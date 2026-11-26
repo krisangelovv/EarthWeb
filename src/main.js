@@ -5,6 +5,7 @@ import { Environment } from './environment.js';
 import { WeatherFX } from './weatherfx.js';
 import { Player, findOpenSpawn } from './player.js';
 import { Airsoft } from './airsoft.js';
+import { ShotAudio } from './shot-audio.js';
 import { Multiplayer } from './multiplayer.js';
 import { loadWorld } from './world/world.js';
 import { fetchWeather, WEATHER_PRESETS, describeWeather, weatherToEffects } from './data/weather.js';
@@ -68,6 +69,13 @@ function toast(msg, ms = 4000) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => (t.hidden = true), ms);
 }
+
+const shotAudio = new ShotAudio((message) => {
+  console.warn(message);
+  toast(message);
+});
+window.addEventListener('pointerdown', () => shotAudio.unlock(), true);
+window.addEventListener('keydown', () => shotAudio.unlock(), true);
 
 const statusItems = new Map();
 function setStatus(key, label, st, msg) {
@@ -193,6 +201,7 @@ const multiplayer = new Multiplayer({
     if (Math.abs(p.x) > world.radius || Math.abs(p.z) > world.radius) return;
     airsoft.spawnPellet(new THREE.Vector3(p.x, shot.altitude - world.terrain.baseElev, p.z),
       new THREE.Vector3(shot.vx, shot.vy, shot.vz));
+    shotAudio.play();
   },
   onJoinLocation: (position) => {
     const lat = position.lat;
@@ -208,6 +217,7 @@ const multiplayer = new Multiplayer({
 airsoft.onShot = (start, velocity) => {
   const world = state.world;
   if (!world || state.loading) return;
+  shotAudio.play();
   multiplayer.sendShot({ ...world.frame.toGeo(start.x, start.z), altitude: start.y + world.terrain.baseElev,
     vx: velocity.x, vy: velocity.y, vz: velocity.z });
 };
@@ -230,19 +240,28 @@ $('walk').onclick = () => (state.world ? player.lock() : goTo(state.place));
 $('view').addEventListener('click', () => state.world && !state.loading && !player.locked && player.lock());
 let firing = false;
 
-$('view').addEventListener('pointerdown', (event) => {
-  if (event.button === 0 && player.locked && state.world && !state.loading) {
-    firing = true;
-  }
+$('view').addEventListener('mousedown', (event) => {
+  if (!player.locked || !state.world || state.loading) return;
+  if (event.button === 0) firing = true;
+  if (event.button === 2) airsoft.aiming = true;
 });
 
-window.addEventListener('pointerup', (event) => {
+window.addEventListener('mouseup', (event) => {
   if (event.button === 0) firing = false;
+  if (event.button === 2) airsoft.aiming = false;
 });
 
-window.addEventListener('blur', () => { firing = false; });
+$('view').addEventListener('contextmenu', (event) => {
+  if (player.locked) event.preventDefault();
+});
+
+function releaseMouseControls() {
+  firing = false;
+  airsoft.aiming = false;
+}
+window.addEventListener('blur', releaseMouseControls);
 document.addEventListener('pointerlockchange', () => {
-  if (!player.locked) firing = false;
+  if (!player.locked) releaseMouseControls();
 });
 
 $('q').value = state.place.name;

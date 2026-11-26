@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { PELLET_SPEED } from './airsoft.js';
 
 const PREFIX = 'earthweb-';
 const CODE = /^[a-f0-9]{24}$/;
@@ -14,11 +15,12 @@ function validPosition(p) {
 }
 
 function validShot(p) {
-  return p && Number.isFinite(p.lat) && Math.abs(p.lat) <= 85 &&
+  if (!(p && Number.isFinite(p.lat) && Math.abs(p.lat) <= 85 &&
     Number.isFinite(p.lon) && Math.abs(p.lon) <= 180 &&
     Number.isFinite(p.altitude) && Math.abs(p.altitude) <= 20000 &&
-    Number.isFinite(p.vx) && Number.isFinite(p.vy) && Number.isFinite(p.vz) &&
-    Math.hypot(p.vx, p.vy, p.vz) >= 39 && Math.hypot(p.vx, p.vy, p.vz) <= 41;
+    Number.isFinite(p.vx) && Number.isFinite(p.vy) && Number.isFinite(p.vz))) return false;
+  const speed = Math.hypot(p.vx, p.vy, p.vz);
+  return Math.abs(speed - PELLET_SPEED) <= 1 || Math.abs(speed - 40) <= 1; // 40 m/s in older clients
 }
 
 function makeAvatar() {
@@ -167,7 +169,11 @@ export class Multiplayer {
   }
 
   sendShot(shot) {
-    if (!this.connection?.open || !validShot(shot)) return;
+    if (!this.connection?.open) return;
+    if (!validShot(shot)) {
+      console.warn('Cannot send an invalid airsoft shot.');
+      return;
+    }
     try { this.connection.send({ type: 'shot', shot }); }
     catch (error) { this.fail('Could not send shot: ' + error.message); }
   }

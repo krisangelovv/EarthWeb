@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 
-const SHOT_INTERVAL = 0.02;
-const PELLET_SPEED = 40;
+const SHOT_INTERVAL = 0.09;
+export const PELLET_SPEED = 35;
 const PELLET_LIFETIME = 2.5;
 
 function capsuleBetween(a, b, radius, material) {
@@ -53,9 +53,11 @@ export class Airsoft {
     box(this.model, [0.10, 0.035, 0.25], [0.22, -0.073, -0.78], trim);
     const tip = new THREE.Mesh(new THREE.CylinderGeometry(0.042, 0.042, 0.09, 12), orange);
     tip.rotation.x = Math.PI / 2;
-    tip.position.set(0.00, -0.1, 0.00);
+    tip.position.set(0.22, -0.15, -1.215);
     this.model.add(tip);
-    this.muzzle = new THREE.Vector3(0.00, -0.1, 0.00);
+    this.muzzle = new THREE.Object3D();
+    this.muzzle.position.y = -0.045;
+    tip.add(this.muzzle);
 
     this.pelletGroup = new THREE.Group();
     scene.add(this.pelletGroup);
@@ -65,6 +67,8 @@ export class Airsoft {
     this.cooldown = 0;
     this.recoil = 0;
     this.bob = 0;
+    this.aiming = false;
+    this.aimBlend = 0;
     this.onShot = () => {};
   }
 
@@ -75,12 +79,10 @@ export class Airsoft {
 
   shoot(camera) {
     if (this.cooldown > 0) return false;
-    camera.updateMatrixWorld();
-    this.model.updateMatrixWorld();
-    const start = this.model.localToWorld(this.muzzle.clone()).applyQuaternion(camera.quaternion).add(camera.position);
-    const direction = camera.getWorldDirection(new THREE.Vector3());
-    const target = camera.position.clone().addScaledVector(direction, 30);
-    const velocity = target.sub(start).normalize().multiplyScalar(PELLET_SPEED);
+    const start = this.muzzle.getWorldPosition(new THREE.Vector3())
+      .applyQuaternion(camera.getWorldQuaternion(new THREE.Quaternion()))
+      .add(camera.getWorldPosition(new THREE.Vector3()));
+    const velocity = camera.getWorldDirection(new THREE.Vector3()).multiplyScalar(PELLET_SPEED);
     this.spawnPellet(start, velocity);
     this.onShot(start, velocity);
     this.cooldown = SHOT_INTERVAL;
@@ -99,8 +101,11 @@ export class Airsoft {
     this.cooldown = Math.max(0, this.cooldown - dt);
     this.recoil = Math.max(0, this.recoil - dt * 7);
     this.bob += dt * (moving ? 9 : 2);
-    this.model.position.set(0.28 + (moving ? Math.sin(this.bob) * 0.01 : 0),
-      (moving ? Math.abs(Math.cos(this.bob)) * 0.008 : 0) - this.recoil * 0.018, this.recoil * 0.06);
+    this.aimBlend += ((this.aiming ? 1 : 0) - this.aimBlend) * (1 - Math.exp(-dt * 14));
+    const hip = 1 - this.aimBlend;
+    this.model.position.set(0.28 * hip - 0.22 * this.aimBlend + (moving ? Math.sin(this.bob) * 0.01 * hip : 0),
+      0.0555 * this.aimBlend + (moving ? Math.abs(Math.cos(this.bob)) * 0.008 * hip : 0) - this.recoil * 0.018,
+      this.recoil * 0.06);
     this.model.rotation.x = this.recoil * 0.08;
     for (let i = this.pellets.length - 1; i >= 0; i--) {
       const pellet = this.pellets[i];

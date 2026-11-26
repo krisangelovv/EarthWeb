@@ -11,6 +11,7 @@
   <pre id="result">Running...</pre>
   <script type="module">
     import * as THREE from 'three';
+    import { Airsoft } from '../src/airsoft.js';
     import { Multiplayer } from '../src/multiplayer.js';
     import { LocalFrame } from '../src/geo.js';
 
@@ -58,6 +59,20 @@
     check(!receivedShot, 'invalid shots must be ignored');
     incoming.emit('data', { type: 'shot', shot });
     check(receivedShot === shot, 'valid shots must be delivered to the world');
+    const airsoft = new Airsoft(scene);
+    let firedShot;
+    airsoft.onShot = (start, velocity) => {
+      firedShot = { lat: 42, lon: 23, altitude: 100, vx: velocity.x, vy: velocity.y, vz: velocity.z };
+      mp.sendShot(firedShot);
+    };
+    airsoft.shoot(new THREE.PerspectiveCamera());
+    check(incoming.messages.at(-1).shot === firedShot, 'actual airsoft shots must pass outgoing validation');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    incoming.emit('data', { type: 'shot', shot: firedShot });
+    check(receivedShot === firedShot, 'actual airsoft shots must pass incoming validation');
+    const sentCount = incoming.messages.length;
+    mp.sendShot({ ...firedShot, vz: -100 });
+    check(incoming.messages.length === sentCount, 'out-of-range shot speeds must be rejected');
     const extra = new FakeConnection();
     host.emit('connection', extra);
     check(!extra.open && mp.connection === incoming, 'room must accept only one player');

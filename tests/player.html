@@ -12,6 +12,7 @@
   <script type="module">
     import * as THREE from 'three';
     import { Airsoft } from '../src/airsoft.js';
+    import { ShotAudio } from '../src/shot-audio.js';
     import { findOpenSpawn } from '../src/player.js';
 
     const check = (condition, message) => { if (!condition) throw new Error(message); };
@@ -46,11 +47,67 @@
     check(airsoft.pellets.length === 0 && airsoft.pelletGroup.children.length === 0 && airsoft.shoot(camera),
       'world changes must clear pellets and reset firing');
 
+    airsoft.clear();
+    airsoft.update(1, world, false);
+    check(Math.abs(airsoft.model.position.x - 0.28) < 0.001, 'weapon should start in its hip position');
+    airsoft.aiming = true;
+    airsoft.update(1, world, false);
+    check(Math.abs(airsoft.model.position.x + 0.22) < 0.001 &&
+      Math.abs(airsoft.model.position.y - 0.0555) < 0.001, 'aiming should center the weapon sight');
+    const tip = airsoft.muzzle.parent;
+    const barrel = airsoft.model.children.find((part) =>
+      part.geometry instanceof THREE.BoxGeometry && part.geometry.parameters.depth === 0.24);
+    check(Math.abs(tip.position.x - barrel.position.x) < 0.001 &&
+      Math.abs(tip.position.y - barrel.position.y) < 0.001 &&
+      Math.abs(tip.position.z + 0.045 - (barrel.position.z - 0.12)) < 0.001,
+      'orange tip must attach to the front of the barrel');
+    camera.rotation.set(0.3, Math.PI / 2, 0, 'YXZ');
+    airsoft.model.rotation.x = 0.08;
+    const expectedStart = tip.localToWorld(new THREE.Vector3(0, -0.045, 0))
+      .applyQuaternion(camera.getWorldQuaternion(new THREE.Quaternion()))
+      .add(camera.getWorldPosition(new THREE.Vector3()));
+    let sharedStart, sharedVelocity;
+    airsoft.onShot = (start, velocity) => { sharedStart = start.clone(); sharedVelocity = velocity.clone(); };
+    check(airsoft.shoot(camera), 'shooting while aiming should still work');
+    const aimedPellet = airsoft.pellets[0];
+    check(aimedPellet.mesh.position.distanceTo(expectedStart) < 1e-6 &&
+      sharedStart.distanceTo(expectedStart) < 1e-6, 'local and shared shots must start at the tip');
+    check(aimedPellet.velocity.clone().normalize().dot(camera.getWorldDirection(new THREE.Vector3())) > 0.999999 &&
+      sharedVelocity.distanceTo(aimedPellet.velocity) < 1e-6, 'shots must move straight forward in the camera direction');
+    airsoft.clear();
+    airsoft.aiming = false;
+    airsoft.update(1, world, false);
+    check(Math.abs(airsoft.model.position.x - 0.28) < 0.001 &&
+      Math.abs(airsoft.model.position.y) < 0.001, 'releasing aim should restore the hip position');
+
     const blockedWorld = { radius: 100, blocked: (x, z) => Math.hypot(x, z) < 4 };
     const spawn = findOpenSpawn(blockedWorld);
     check(spawn && !blockedWorld.blocked(spawn.x, spawn.z), 'spawn must escape a building footprint');
     check(findOpenSpawn({ radius: 10, blocked: () => true }) === null,
       'spawn must report when no nearby position is available');
+
+    const NativeAudioContext = window.AudioContext;
+    let startedSounds = 0;
+    class FakeAudioContext {
+      constructor() { this.sampleRate = 48000; this.state = 'suspended'; this.destination = {}; }
+      createBuffer(channels, length) {
+        const samples = new Float32Array(length);
+        return { getChannelData: () => samples };
+      }
+      createBufferSource() { return { connect() {}, start() { startedSounds++; } }; }
+      createGain() { return { gain: {}, connect() {} }; }
+      resume() { this.state = 'running'; return Promise.resolve(); }
+    }
+    window.AudioContext = FakeAudioContext;
+    const audio = new ShotAudio((message) => { throw new Error(message); });
+    audio.unlock();
+    check(audio.context.state === 'running' &&
+      audio.buffer.getChannelData(0).some((sample) => Math.abs(sample) > 0.01),
+      'audio must unlock and generate a non-silent airsoft click');
+    audio.play();
+    audio.play();
+    check(startedSounds === 2, 'each shot must start its own click');
+    window.AudioContext = NativeAudioContext;
 
     document.getElementById('result').textContent = 'PASS: airsoft player and visual pellets';
   </script>
