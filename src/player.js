@@ -1,6 +1,21 @@
 import * as THREE from 'three';
 import { CONFIG } from './config.js';
 
+export function findOpenSpawn(world, x = 0, z = 0, radius = CONFIG.player.radius) {
+  if (!world.blocked(x, z, radius)) return { x, z };
+  const limit = Math.min(100, world.radius - 6);
+  for (let distance = 1; distance <= limit; distance += 1) {
+    const count = Math.ceil(2 * Math.PI * distance / 1.5);
+    for (let i = 0; i < count; i++) {
+      const angle = 2 * Math.PI * i / count;
+      const nx = x + Math.cos(angle) * distance, nz = z + Math.sin(angle) * distance;
+      if (Math.abs(nx) < world.radius - 6 && Math.abs(nz) < world.radius - 6 && !world.blocked(nx, nz, radius))
+        return { x: nx, z: nz };
+    }
+  }
+  return null;
+}
+
 // First-person walker: pointer-lock mouse look, WASD, sprint, jump, fly mode, terrain following, building collision.
 export class Player {
   constructor(camera, dom) {
@@ -60,7 +75,7 @@ export class Player {
     this.pos.x = Math.max(-lim, Math.min(lim, this.pos.x));
     this.pos.z = Math.max(-lim, Math.min(lim, this.pos.z));
 
-    const ground = world.heightAt(this.pos.x, this.pos.z);
+    const ground = world.heightAt(this.pos.x, this.pos.z, this.pos.y);
     if (this.fly) {
       this.pos.y += ((k.has('Space') ? 1 : 0) - (k.has('KeyC') ? 1 : 0)) * speed * dt;
       this.pos.y = Math.max(ground, this.pos.y);

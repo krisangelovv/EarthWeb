@@ -3,7 +3,7 @@ import { CONFIG } from './config.js';
 import { sunPosition, DEG } from './geo.js';
 import { Environment } from './environment.js';
 import { WeatherFX } from './weatherfx.js';
-import { Player } from './player.js';
+import { Player, findOpenSpawn } from './player.js';
 import { Airsoft } from './airsoft.js';
 import { Multiplayer } from './multiplayer.js';
 import { loadWorld } from './world/world.js';
@@ -52,6 +52,7 @@ const state = {
   simTime: Date.now(), live: true, speed: 1,
   weatherMode: 'live', liveWeather: null, weatherAt: 0,
   gps: { follow: false, last: null, stop: null },
+  reloadAfter: 0,
 };
 state.liveWeather = { ...WEATHER_PRESETS.clear, utcOffset: Math.round(state.place.lon / 15) * 3600, source: 'default' };
 
@@ -111,7 +112,7 @@ async function loadArea(lat, lon, { blocking = true } = {}) {
     toast('Loading the next area…', 15000);
   }
   syncOverlays();
-  const weatherReq = refreshWeather(lat, lon, blocking);
+  refreshWeather(lat, lon, blocking);
   try {
     const world = await loadWorld(lat, lon, {
       renderer, options: state.options, signal: ctrl.signal,
@@ -119,14 +120,21 @@ async function loadArea(lat, lon, { blocking = true } = {}) {
     });
     if (ctrl.signal.aborted) return world.dispose();
 
+    const spawn = findOpenSpawn(world);
+    if (!spawn) {
+      world.dispose();
+      throw new Error('No safe starting position found near this location.');
+    }
     const old = state.world;
     if (old) { scene.remove(old.group); old.dispose(); }
     airsoft.clear();
     scene.add(world.group);
     env.wallMaterial = world.wallMaterial;
     state.world = world;
-    player.pos.set(0, world.heightAt(0, 0), 0); // the new world is centred on the player
+    player.pos.set(spawn.x, world.heightAt(spawn.x, spawn.z), spawn.z);
     player.vy = 0;
+    player.grounded = true;
+    state.reloadAfter = 0;
     state.loading = false;
     $('loading').hidden = true;
     $('walk').textContent = 'Walk';
@@ -137,12 +145,15 @@ async function loadArea(lat, lon, { blocking = true } = {}) {
     else if (!world.stats.satellite || world.stats.missingTiles) toast('Satellite imagery is unavailable or incomplete in this area.', 9000);
     else if (!blocking) toast('Area updated', 1500);
     else toast(`${world.stats.roads} road segments · ${world.stats.buildings} buildings · ${world.stats.trees} trees`);
-    await weatherReq;
   } catch (e) {
     if (ctrl.signal.aborted) return;
     console.error(e);
     if (blocking) showError(e);
-    else { state.loading = false; toast('Could not load the next area: ' + e.message); }
+    else {
+      state.loading = false;
+      state.reloadAfter = performance.now() + 15000;
+      toast('Could not load the next area: ' + e.message);
+    }
   }
   syncOverlays();
 }
@@ -167,11 +178,21 @@ function goTo(place, blocking = true) {
 
 const playerGeo = () => state.world.frame.toGeo(player.pos.x, player.pos.z);
 
+let moving = false;
 const multiplayer = new Multiplayer({
   scene,
   getPosition: () => {
     if (!state.world || state.loading) return null;
-    return { ...playerGeo(), height: Math.max(0, player.pos.y - state.world.heightAt(player.pos.x, player.pos.z)), yaw: player.yaw };
+    return { ...playerGeo(), height: Math.max(0, player.pos.y - state.world.heightAt(player.pos.x, player.pos.z)),
+      yaw: player.yaw, pitch: player.pitch, moving };
+  },
+  onShot: (shot) => {
+    const world = state.world;
+    if (!world || state.loading) return;
+    const p = world.frame.toLocal(shot.lat, shot.lon);
+    if (Math.abs(p.x) > world.radius || Math.abs(p.z) > world.radius) return;
+    airsoft.spawnPellet(new THREE.Vector3(p.x, shot.altitude - world.terrain.baseElev, p.z),
+      new THREE.Vector3(shot.vx, shot.vy, shot.vz));
   },
   onJoinLocation: (position) => {
     const lat = position.lat;
@@ -184,6 +205,12 @@ const multiplayer = new Multiplayer({
     toast(message);
   },
 });
+airsoft.onShot = (start, velocity) => {
+  const world = state.world;
+  if (!world || state.loading) return;
+  multiplayer.sendShot({ ...world.frame.toGeo(start.x, start.z), altitude: start.y + world.terrain.baseElev,
+    vx: velocity.x, vy: velocity.y, vz: velocity.z });
+};
 
 // ---------- menu wiring ----------
 $('mp-host').onclick = () => {
@@ -352,11 +379,14 @@ renderer.setAnimationLoop(() => {
   const fx = weatherToEffects(w, world ? world.radius : CONFIG.radius);
 
   if (world) {
+    const oldX = player.pos.x, oldZ = player.pos.z;
     if (!state.loading) player.update(dt, world);
     if (!state.loading) airsoft.update(dt, world, player.locked &&
       ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowLeft', 'ArrowDown', 'ArrowRight'].some((key) => player.keys.has(key)));
     followGps(dt, world);
-    if (!state.loading && Math.hypot(player.pos.x, player.pos.z) > world.radius * CONFIG.reloadFraction) {
+    moving = !state.loading && Math.hypot(player.pos.x - oldX, player.pos.z - oldZ) > 0.001;
+    if (!state.loading && performance.now() >= state.reloadAfter &&
+        Math.hypot(player.pos.x, player.pos.z) > world.radius * CONFIG.reloadFraction) {
       const g = playerGeo();
       loadArea(g.lat, g.lon, { blocking: false });
     }
@@ -382,7 +412,7 @@ function followGps(dt, world) {
   if (!state.gps.follow || !fix || state.loading) return;
   const t = world.frame.toLocal(fix.lat, fix.lon);
   if (Math.hypot(t.x, t.z) > world.radius * CONFIG.reloadFraction) {
-    loadArea(fix.lat, fix.lon, { blocking: false });
+    if (performance.now() >= state.reloadAfter) loadArea(fix.lat, fix.lon, { blocking: false });
     return;
   }
   const k = 1 - Math.exp(-dt * 2);

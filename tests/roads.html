@@ -12,10 +12,13 @@
   <script type="module">
     import * as THREE from 'three';
     import { LocalFrame, inPolygon, PolygonGrid } from '../src/geo.js';
-    import { parseOsm } from '../src/data/osm.js';
+    import { fetchOsm, parseOsm } from '../src/data/osm.js';
     import { mergeOverture } from '../src/data/overture.js';
     import { loadMosaic } from '../src/data/tiles.js';
     import { RoadGrid, buildRoads } from '../src/world/roads.js';
+    import { buildBridges } from '../src/world/bridges.js';
+    import { buildStreetscape } from '../src/world/streetscape.js';
+    import { Player } from '../src/player.js';
     import { buildBuildings } from '../src/world/buildings.js';
     import { buildVegetation } from '../src/world/vegetation.js';
 
@@ -30,6 +33,7 @@
     ] }, frame, 100);
     check(osm.roads.length === 2 && osm.roads[0].width === 8 && osm.roads[1].width === 6.4,
       'road parsing must use widths and lanes and skip bridges and gravel');
+    check(osm.bridges.length === 1, 'mapped bridges must be retained separately from ground roads');
     check(!osm.roads[0].estimatedWidth && !osm.roads[1].estimatedWidth,
       'explicit widths and lane counts must not be replaced by wall estimates');
     const defaults = parseOsm({ elements: [
@@ -46,6 +50,17 @@
       return [...points, points[0]];
     };
     const osmRing = (ring) => ringGeo(ring).map(([lon, lat]) => ({ lat, lon }));
+    const mappedStreets = parseOsm({ elements: [
+      { type: 'way', id: 700, tags: { highway: 'footway', footway: 'sidewalk', width: '2' }, geometry },
+      { type: 'node', id: 701, tags: { highway: 'street_lamp' }, ...frame.toGeo(5, 5) },
+      { type: 'way', id: 702, tags: { landuse: 'residential' }, geometry: osmRing([[-40,-40], [40,-40], [40,40], [-40,40]]) },
+      { type: 'way', id: 703, tags: { building: 'house', 'building:material': 'brick', 'building:colour': '#123456' },
+        geometry: osmRing([[10,10], [20,10], [20,20], [10,20]]) },
+    ] }, frame, 100);
+    check(mappedStreets.sidewalks.length === 1 && mappedStreets.sidewalks[0].width === 2 &&
+      mappedStreets.lamps.length === 1 && mappedStreets.urbanAreas.length === 1,
+      'OSM sidewalks, street lamps and urban land use must be parsed');
+    check(mappedStreets.buildings[0].color === '#123456', 'explicit building colour must override material');
     const mapItems = parseOsm({ elements: [
       { type: 'way', id: 101, tags: { building: 'house', 'roof:colour': '#ff0000' },
         geometry: osmRing([[0,0], [10,0], [10,10], [0,10]]) },
@@ -107,6 +122,49 @@
       isPart: false, height: 12, minHeight: 0,
     };
     const terrain = { heightAt: () => 0 };
+    const bridge = buildBridges([{ points: [{ x: -60, z: 0 }, { x: 60, z: 0 }], width: 8 }], terrain, 100);
+    check(bridge.group.children.length === 1, 'mapped bridge deck must render');
+    const bridgeTop = bridge.heightAt(0, 0, 5, 0);
+    check(bridgeTop > 4 && bridge.heightAt(0, 0, 0, 0) === 0,
+      'bridge must be walkable above while preserving the ground below');
+    let previous = bridge.heightAt(-60, 0, 10, 0);
+    for (let x = -59; x <= 60; x++) {
+      const current = bridge.heightAt(x, 0, 10, 0);
+      check(Math.abs(current - previous) < 0.3, 'bridge profile must not have sharp height steps');
+      previous = current;
+    }
+    const bridgeWorld = { radius: 100, blocked: () => false,
+      heightAt: (x, z, y) => Number.isFinite(y) ? bridge.heightAt(x, z, y, 0) : 0 };
+    const walker = new Player(new THREE.PerspectiveCamera(), document.createElement('canvas'));
+    walker.pos.set(-59, bridge.heightAt(-59, 0, 0, 0), 0);
+    walker.yaw = -Math.PI / 2;
+    walker.keys.add('KeyW');
+    for (let i = 0; i < 1150; i++) walker.update(1 / 60, bridgeWorld);
+    walker.keys.clear();
+    check(walker.pos.x > 0 && walker.pos.y > 4, 'player must be able to walk up and onto the bridge');
+    const blank = document.createElement('canvas');
+    blank.width = blank.height = 256;
+    const streetImagery = { canvas: blank, width: 256, height: 256,
+      toPixel: (lat, lon) => ({ x: (lon - 23) * 10000 + 128, y: (42 - lat) * 10000 + 128 }) };
+    const streetGrid = new RoadGrid([{ points: [{ x: -40, z: 0 }, { x: 40, z: 0 }],
+      width: 6, highway: 'residential' }], 100);
+    const urbanArea = poly(-100, -100, 100, 100);
+    const urbanStreet = buildStreetscape({ roads: streetGrid, sidewalks: [], lamps: [],
+      urbanAreas: [urbanArea], buildings: new PolygonGrid(), terrain, imagery: streetImagery, frame, radius: 100 });
+    check(urbanStreet.sidewalkSegments > 0 && urbanStreet.lamps > 0 && streetGrid.intersectsDisc(0, 4),
+      'urban roads should get imagery sidewalks, lamps and vegetation clearance');
+    const ruralGrid = new RoadGrid([{ points: [{ x: -40, z: 0 }, { x: 40, z: 0 }],
+      width: 6, highway: 'residential' }], 100);
+    const ruralStreet = buildStreetscape({ roads: ruralGrid, sidewalks: [], lamps: [], urbanAreas: [],
+      buildings: new PolygonGrid(), terrain, imagery: streetImagery, frame, radius: 100 });
+    check(ruralStreet.sidewalkSegments === 0, 'rural roads without mapped sidewalks should not get inferred sidewalks');
+    const mappedGrid = new RoadGrid([{ points: [{ x: -40, z: 0 }, { x: 40, z: 0 }],
+      width: 6, highway: 'residential', sidewalk: 'left' }], 100);
+    const mappedStreet = buildStreetscape({ roads: mappedGrid, sidewalks: [], lamps: [{ x: 10, z: 10 }],
+      urbanAreas: [], buildings: new PolygonGrid(), terrain, imagery: streetImagery, frame, radius: 100 });
+    check(mappedStreet.sidewalkSegments > 0 && mappedGrid.intersectsDisc(0, -4) &&
+      !mappedGrid.intersectsDisc(0, 4) && mappedStreet.lamps > 0,
+      'mapped sidewalks and lamps must render outside urban areas on the tagged side');
     const built = buildBuildings([building], terrain);
     const renderedRoads = buildRoads([osm.roads[0]], terrain, 100, built.footprints);
     check(built.count === 1 && built.group.children.length > 0 && built.grid.contains(10, 4),
@@ -383,6 +441,24 @@
       const valid = await loadMosaic({ template: 'test/{z}/{x}/{y}', bbox: { north: 42, south: 42, west: 23, east: 23 },
         zoom: 18, requireComplete: true, rejectEsriNoData: true });
       check(valid.loaded === 1, 'uniform imagery must not be mistaken for the Esri placeholder');
+    } finally {
+      window.fetch = originalFetch;
+    }
+    let slowerAborted = false;
+    try {
+      window.fetch = (url, options) => {
+        if (url === 'slow') return new Promise((resolve, reject) => {
+          options.signal.addEventListener('abort', () => {
+            slowerAborted = true;
+            reject(options.signal.reason);
+          }, { once: true });
+        });
+        return Promise.resolve(new Response(JSON.stringify({ elements: [] })));
+      };
+      const unique = Math.random() * 10;
+      const loaded = await fetchOsm({ south: unique, west: unique, north: unique + 0.01, east: unique + 0.01 },
+        { endpoints: ['slow', 'fast'] });
+      check(loaded.elements.length === 0 && slowerAborted, 'a successful Overpass mirror must cancel the slower request');
     } finally {
       window.fetch = originalFetch;
     }

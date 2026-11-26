@@ -8,7 +8,17 @@ function validPosition(p) {
   return p && Number.isFinite(p.lat) && Math.abs(p.lat) <= 85 &&
     Number.isFinite(p.lon) && Math.abs(p.lon) <= 180 &&
     Number.isFinite(p.height) && p.height >= 0 && p.height < 10000 &&
-    Number.isFinite(p.yaw) && Math.abs(p.yaw) < 100000;
+    Number.isFinite(p.yaw) && Math.abs(p.yaw) < 100000 &&
+    (p.pitch === undefined || Number.isFinite(p.pitch) && Math.abs(p.pitch) <= 1.5) &&
+    (p.moving === undefined || typeof p.moving === 'boolean');
+}
+
+function validShot(p) {
+  return p && Number.isFinite(p.lat) && Math.abs(p.lat) <= 85 &&
+    Number.isFinite(p.lon) && Math.abs(p.lon) <= 180 &&
+    Number.isFinite(p.altitude) && Math.abs(p.altitude) <= 20000 &&
+    Number.isFinite(p.vx) && Number.isFinite(p.vy) && Number.isFinite(p.vz) &&
+    Math.hypot(p.vx, p.vy, p.vz) >= 39 && Math.hypot(p.vx, p.vy, p.vz) <= 41;
 }
 
 function makeAvatar() {
@@ -20,23 +30,40 @@ function makeAvatar() {
     const mesh = new THREE.Mesh(geometry, material);
     mesh.position.set(x, y, z);
     group.add(mesh);
+    return mesh;
   };
   part(new THREE.BoxGeometry(0.52, 0.65, 0.28), clothes, 0, 1.15, 0);
   part(new THREE.SphereGeometry(0.18, 12, 8), skin, 0, 1.67, 0);
-  part(new THREE.BoxGeometry(0.16, 0.62, 0.17), clothes, -0.34, 1.12, 0);
-  part(new THREE.BoxGeometry(0.16, 0.62, 0.17), clothes, 0.34, 1.12, 0);
-  part(new THREE.BoxGeometry(0.2, 0.8, 0.2), dark, -0.13, 0.4, 0);
-  part(new THREE.BoxGeometry(0.2, 0.8, 0.2), dark, 0.13, 0.4, 0);
+  const upper = new THREE.Group();
+  upper.position.y = 1.4;
+  group.add(upper);
+  const arm = (x) => {
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.45, 0.16), clothes);
+    mesh.position.set(x, -0.13, -0.16);
+    mesh.rotation.x = -0.65;
+    upper.add(mesh);
+  };
+  arm(-0.25); arm(0.25);
+  const gun = new THREE.Mesh(new THREE.BoxGeometry(0.13, 0.15, 0.5), dark);
+  gun.position.set(0.06, -0.14, -0.43);
+  upper.add(gun);
+  const tip = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.12, 0.06), new THREE.MeshStandardMaterial({ color: '#ff7b28' }));
+  tip.position.set(0.06, -0.14, -0.71);
+  upper.add(tip);
+  const leftLeg = part(new THREE.BoxGeometry(0.2, 0.8, 0.2), dark, -0.13, 0.4, 0);
+  const rightLeg = part(new THREE.BoxGeometry(0.2, 0.8, 0.2), dark, 0.13, 0.4, 0);
   part(new THREE.BoxGeometry(0.08, 0.08, 0.05), dark, 0, 1.67, -0.17);
   group.visible = false;
+  group.userData = { upper, leftLeg, rightLeg };
   return group;
 }
 
 export class Multiplayer {
-  constructor({ scene, getPosition, onJoinLocation, onStatus, loadPeer }) {
+  constructor({ scene, getPosition, onJoinLocation, onStatus, onShot = () => {}, loadPeer }) {
     this.getPosition = getPosition;
     this.onJoinLocation = onJoinLocation;
     this.onStatus = onStatus;
+    this.onShot = onShot;
     this.loadPeer = loadPeer || (() => import('https://esm.sh/peerjs@1.5.5?bundle').then((m) => m.default));
     this.avatar = makeAvatar();
     scene.add(this.avatar);
@@ -46,6 +73,9 @@ export class Multiplayer {
     this.remote = null;
     this.lastSend = 0;
     this.timer = null;
+    this.walkTime = 0;
+    this.shotRecoil = 0;
+    this.lastRemoteShot = 0;
   }
 
   async start(role, code = '') {
@@ -111,7 +141,17 @@ export class Multiplayer {
       this.onStatus('Player connected.', this.role === 'host' ? this.code : '');
     });
     connection.on('data', (data) => {
-      if (generation !== this.generation || !data || !validPosition(data.position)) return;
+      if (generation !== this.generation || !data) return;
+      if (data.type === 'shot') {
+        const now = performance.now();
+        if (validShot(data.shot) && now - this.lastRemoteShot >= 15) {
+          this.lastRemoteShot = now;
+          this.shotRecoil = 1;
+          this.onShot(data.shot);
+        }
+        return;
+      }
+      if (!validPosition(data.position)) return;
       if (data.type === 'welcome' && this.role === 'join' && !this.receivedWelcome) {
         this.receivedWelcome = true;
         this.onJoinLocation(data.position);
@@ -124,6 +164,12 @@ export class Multiplayer {
     connection.on('error', (error) => {
       if (generation === this.generation) this.fail('Connection error: ' + error.message);
     });
+  }
+
+  sendShot(shot) {
+    if (!this.connection?.open || !validShot(shot)) return;
+    try { this.connection.send({ type: 'shot', shot }); }
+    catch (error) { this.fail('Could not send shot: ' + error.message); }
   }
 
   update(dt, world, now = performance.now()) {
@@ -158,6 +204,12 @@ export class Multiplayer {
     if (!this.avatar.visible) this.avatar.position.copy(target);
     else this.avatar.position.lerp(target, 1 - Math.exp(-dt * 12));
     this.avatar.rotation.y = this.remote.yaw;
+    this.walkTime += dt * 9;
+    const swing = this.remote.moving ? Math.sin(this.walkTime) * 0.45 : 0;
+    this.avatar.userData.leftLeg.rotation.x = swing;
+    this.avatar.userData.rightLeg.rotation.x = -swing;
+    this.shotRecoil = Math.max(0, this.shotRecoil - dt * 7);
+    this.avatar.userData.upper.rotation.x = (this.remote.pitch || 0) + this.shotRecoil * 0.12;
     this.avatar.visible = true;
   }
 
@@ -176,6 +228,8 @@ export class Multiplayer {
     this.receivedWelcome = false;
     this.sentWelcome = false;
     this.lastWorld = null;
+    this.lastRemoteShot = 0;
+    this.shotRecoil = 0;
     this.avatar.visible = false;
     if (connection) connection.close();
     if (peer) peer.destroy();

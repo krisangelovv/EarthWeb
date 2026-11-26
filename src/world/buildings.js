@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import { PolygonGrid, inPolygon, pointInRing, signedArea } from '../geo.js';
 
-const FACADES = ['#d9d2c5', '#c9c2b4', '#e2d8c3', '#b9b2a6', '#d8c9b0', '#c7b8a3', '#e8e4da', '#bfc4c7', '#cdb9a0', '#aeb6b3'];
+const FACADES = ['#d9d2c5', '#c9c2b4', '#e2d8c3', '#b9b2a6', '#d8c9b0', '#c7b8a3', '#e8e4da',
+  '#bfc4c7', '#cdb9a0', '#aeb6b3', '#d6b49f', '#dfc6b5', '#c4cbbd', '#d9c99d', '#c0c6d0', '#c6a9a4'];
 const ROOFS = ['#6b6f73', '#8a8d90', '#7a4a3a', '#5d5d5d', '#9b5a42', '#74777a'];
 const FLAT_BUILDING_TYPES = new Set(['apartments', 'dormitory', 'industrial', 'warehouse', 'commercial', 'office',
   'retail', 'hospital', 'school', 'university', 'public', 'civic']);

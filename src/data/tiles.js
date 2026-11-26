@@ -17,7 +17,8 @@ function isEsriNoData(bitmap) {
 }
 
 async function fetchBitmap(url, signal, rejectEsriNoData) {
-  const res = await fetch(url, { signal, mode: 'cors' });
+  const timeout = AbortSignal.timeout(12000);
+  const res = await fetch(url, { signal: signal ? AbortSignal.any([signal, timeout]) : timeout, mode: 'cors' });
   if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
   // 'none' keeps raw pixel values (required to decode elevation from colours).
   const bitmap = await createImageBitmap(await res.blob(), { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
@@ -31,9 +32,7 @@ async function fetchBitmap(url, signal, rejectEsriNoData) {
 export const tileUrl = (template, z, x, y) =>
   template.replace('{z}', z).replace('{x}', x).replace('{y}', y);
 
-// Downloads every slippy-map tile covering `bbox` and stitches them into one canvas.
-// Lowers the zoom until the mosaic fits in maxSize pixels.
-export async function loadMosaic({ template, bbox, zoom, maxSize = 4096, signal, fill = '#5b6b4a', concurrency = 8, requireComplete = false, rejectEsriNoData = false }) {
+function mosaicBounds(bbox, zoom, maxSize) {
   let z = zoom, r;
   for (;; z--) {
     const a = latLonToPixel(bbox.north, bbox.west, z);
@@ -45,6 +44,17 @@ export async function loadMosaic({ template, bbox, zoom, maxSize = 4096, signal,
     };
     if (((r.x1 - r.x0 + 1) * 256 <= maxSize && (r.y1 - r.y0 + 1) * 256 <= maxSize) || z <= 8) break;
   }
+  return { z, r };
+}
+
+export function mosaicZoom(bbox, zoom, maxSize) {
+  return mosaicBounds(bbox, zoom, maxSize).z;
+}
+
+// Downloads every slippy-map tile covering `bbox` and stitches them into one canvas.
+// Lowers the zoom until the mosaic fits in maxSize pixels.
+export async function loadMosaic({ template, bbox, zoom, maxSize = 4096, signal, fill = '#5b6b4a', concurrency = 8, requireComplete = false, rejectEsriNoData = false }) {
+  const { z, r } = mosaicBounds(bbox, zoom, maxSize);
 
   const width = (r.x1 - r.x0 + 1) * 256, height = (r.y1 - r.y0 + 1) * 256;
   const canvas = document.createElement('canvas');

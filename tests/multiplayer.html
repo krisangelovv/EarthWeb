@@ -30,11 +30,11 @@
       connect(id) { this.target = id; return this.outgoing = new FakeConnection(); }
       destroy() { this.destroyed = true; }
     }
-    let position = null, joined = null, status = '';
+    let position = null, joined = null, status = '', receivedShot = null;
     const scene = new THREE.Scene();
     const mp = new Multiplayer({
       scene, getPosition: () => position, onJoinLocation: (p) => { joined = p; },
-      onStatus: (message) => { status = message; }, loadPeer: async () => FakePeer,
+      onStatus: (message) => { status = message; }, onShot: (shot) => { receivedShot = shot; }, loadPeer: async () => FakePeer,
     });
     const original = { lat: 42, lon: 23, height: 2, yaw: 1 };
     const world = { frame: new LocalFrame(42, 23), radius: 1000, heightAt: () => 10 };
@@ -51,6 +51,13 @@
     position = original;
     mp.update(0.1, world, 1100);
     check(incoming.messages[0].type === 'welcome', 'host must send welcome when position becomes available');
+    const shot = { lat: 42, lon: 23, altitude: 100, vx: 0, vy: 0, vz: -40 };
+    mp.sendShot(shot);
+    check(incoming.messages[1].type === 'shot', 'shots must be transmitted');
+    incoming.emit('data', { type: 'shot', shot: { ...shot, vz: Infinity } });
+    check(!receivedShot, 'invalid shots must be ignored');
+    incoming.emit('data', { type: 'shot', shot });
+    check(receivedShot === shot, 'valid shots must be delivered to the world');
     const extra = new FakeConnection();
     host.emit('connection', extra);
     check(!extra.open && mp.connection === incoming, 'room must accept only one player');
@@ -58,6 +65,11 @@
     mp.update(0.1, world);
     check(mp.avatar.visible && mp.avatar.position.y === 12 && mp.avatar.rotation.y === 1,
       'remote avatar must use the current world frame and ground');
+    incoming.emit('data', { type: 'position', position: { ...original, moving: true, pitch: 0.3 } });
+    mp.shotRecoil = 1;
+    mp.update(0.1, world);
+    check(mp.avatar.userData.leftLeg.rotation.x !== 0 && mp.avatar.userData.upper.rotation.x > 0.3,
+      'remote walking, aiming and firing must animate the avatar');
     const recentered = { frame: new LocalFrame(42, 23.001), radius: 1000, heightAt: () => 20 };
     mp.update(0.1, recentered);
     check(mp.avatar.visible && mp.avatar.position.x < -80 && mp.avatar.position.y === 22,

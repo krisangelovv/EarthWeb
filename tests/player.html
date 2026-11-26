@@ -12,6 +12,7 @@
   <script type="module">
     import * as THREE from 'three';
     import { Airsoft } from '../src/airsoft.js';
+    import { findOpenSpawn } from '../src/player.js';
 
     const check = (condition, message) => { if (!condition) throw new Error(message); };
     const scene = new THREE.Scene();
@@ -32,7 +33,7 @@
     check(airsoft.pellets[0].mesh.position.x < previous.x && airsoft.pellets[0].velocity.y < initialY,
       'pellets must move forward and fall');
     check(airsoft.shoot(camera), 'firing must resume after cooldown');
-    airsoft.update(1.5, world, false);
+    airsoft.update(2.5, world, false);
     check(airsoft.pellets.length === 0 && airsoft.pelletGroup.children.length === 0,
       'expired pellets must be removed from the scene');
 
@@ -44,6 +45,12 @@
     airsoft.clear();
     check(airsoft.pellets.length === 0 && airsoft.pelletGroup.children.length === 0 && airsoft.shoot(camera),
       'world changes must clear pellets and reset firing');
+
+    const blockedWorld = { radius: 100, blocked: (x, z) => Math.hypot(x, z) < 4 };
+    const spawn = findOpenSpawn(blockedWorld);
+    check(spawn && !blockedWorld.blocked(spawn.x, spawn.z), 'spawn must escape a building footprint');
+    check(findOpenSpawn({ radius: 10, blocked: () => true }) === null,
+      'spawn must report when no nearby position is available');
 
     document.getElementById('result').textContent = 'PASS: airsoft player and visual pellets';
   </script>

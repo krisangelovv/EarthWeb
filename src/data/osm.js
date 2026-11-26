@@ -2,8 +2,6 @@ import { pointInRing, ringBBox, signedArea } from '../geo.js';
 
 // ---------- fetching ----------
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
 function buildQuery(b) {
   const bb = `(${b.south.toFixed(6)},${b.west.toFixed(6)},${b.north.toFixed(6)},${b.east.toFixed(6)})`;
   return `[out:json][timeout:60];(
@@ -12,6 +10,10 @@ function buildQuery(b) {
     relation["building"]["type"="multipolygon"]${bb};
     relation["building:part"]["type"="multipolygon"]${bb};
     way["highway"~"^(motorway|motorway_link|trunk|trunk_link|primary|primary_link|secondary|secondary_link|tertiary|tertiary_link|unclassified|residential|living_street|service|road)$"]${bb};
+    way["highway"="footway"]["footway"="sidewalk"]${bb};
+    node["highway"="street_lamp"]${bb};
+    way["landuse"~"^(residential|commercial|retail)$"]${bb};
+    relation["landuse"~"^(residential|commercial|retail)$"]["type"="multipolygon"]${bb};
     node["natural"="tree"]${bb};
     way["natural"~"^(wood|scrub|grassland)$"]${bb};
     way["landuse"~"^(forest|orchard|cemetery|grass|meadow)$"]${bb};
@@ -22,41 +24,45 @@ function buildQuery(b) {
   );out geom qt;`;
 }
 
-// The public Overpass servers are shared and sometimes overloaded: try each endpoint, retry with backoff.
+// Bound the wait for busy public Overpass servers so optional map data cannot stall world loading.
 export async function fetchOsm(bbox, { endpoints, signal }) {
   const cacheKey = `https://earthweb.local/osm/${[bbox.south, bbox.west, bbox.north, bbox.east].map((v) => v.toFixed(4)).join('/')}`;
   let cache = null;
   try {
-    cache = await caches.open('earthweb-osm-v3');
+    cache = await caches.open('earthweb-osm-v4');
     const hit = await cache.match(cacheKey);
     if (hit) return await hit.json();
   } catch { /* Cache API unavailable (e.g. insecure context): just skip caching */ }
 
   const body = 'data=' + encodeURIComponent(buildQuery(bbox));
   let lastError;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    for (const url of endpoints) {
-      try {
-        // A hung server must not stall the whole load: give each request 25 s.
-        const res = await fetch(url, {
-          method: 'POST', body,
-          signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(25000)]) : AbortSignal.timeout(25000),
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        });
-        if (!res.ok) throw new Error(`Overpass HTTP ${res.status}`);
-        const text = await res.text();
-        const json = JSON.parse(text);
-        if (!Array.isArray(json.elements) || json.remark) {
-          throw new Error(`Overpass returned incomplete data: ${json.remark || 'missing elements'}`);
-        }
-        if (cache) cache.put(cacheKey, new Response(text, { headers: { 'Content-Type': 'application/json' } })).catch(() => {});
-        return json;
-      } catch (e) {
-        if (signal?.aborted) throw e;
-        lastError = e;
-      }
+  for (let i = 0; i < endpoints.length; i += 2) {
+    const batch = new AbortController();
+    const request = async (url) => {
+      const signals = [batch.signal, AbortSignal.timeout(8000)];
+      if (signal) signals.push(signal);
+      const res = await fetch(url, {
+        method: 'POST', body, signal: AbortSignal.any(signals),
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      });
+      if (!res.ok) throw new Error(`Overpass HTTP ${res.status} from ${url}`);
+      const text = await res.text();
+      const json = JSON.parse(text);
+      if (!Array.isArray(json.elements) || json.remark)
+        throw new Error(`Overpass returned incomplete data: ${json.remark || 'missing elements'}`);
+      return { json, text };
+    };
+    try {
+      const { json, text } = await Promise.any(endpoints.slice(i, i + 2).map(request));
+      batch.abort();
+      if (cache) cache.put(cacheKey, new Response(text, { headers: { 'Content-Type': 'application/json' } }))
+        .catch((error) => console.warn('Could not cache OSM data', error));
+      return json;
+    } catch (error) {
+      batch.abort();
+      if (signal?.aborted) throw signal.reason;
+      lastError = error.errors?.[error.errors.length - 1] || error;
     }
-    await sleep(1500);
   }
   throw lastError ?? new Error('Overpass unavailable');
 }
@@ -118,6 +124,7 @@ function buildingHeights(tags, id) {
 
 const COLOR_RE = /^(#[0-9a-f]{3,8}|[a-z]+)$/i;
 const cssColor = (v) => (v && COLOR_RE.test(v.trim()) ? v.trim() : null);
+const MATERIAL_COLORS = { brick: '#a86d5a', wood: '#a88665', stone: '#b7b0a4', concrete: '#b7b7b3' };
 
 function assembleRings(ways) {
   const same = (a, b) => a.lat === b.lat && a.lon === b.lon;
@@ -187,12 +194,12 @@ const ROAD_WIDTHS = {
   living_street: 5, service: 4, road: 6.5,
 };
 
-function roadOf(el, frame) {
+function roadOf(el, frame, bridge = false) {
   const tags = el.tags || {};
   const defaultWidth = ROAD_WIDTHS[tags.highway];
   if (!defaultWidth || tags.area === 'yes' ||
-      (tags.bridge && tags.bridge !== 'no') || (tags.tunnel && tags.tunnel !== 'no') ||
-      tags.location === 'underground' || tags.layer && Number(tags.layer) !== 0 ||
+      (!bridge && tags.bridge && tags.bridge !== 'no') || (tags.tunnel && tags.tunnel !== 'no') ||
+      tags.location === 'underground' || (!bridge && tags.layer && Number(tags.layer) !== 0) ||
       ['unpaved', 'gravel', 'dirt', 'ground', 'grass', 'sand'].includes(tags.surface)) return null;
   const taggedWidth = parseLength(tags.width);
   const width = taggedWidth > 0 ? taggedWidth : parseLength(tags['width:carriageway']);
@@ -207,17 +214,26 @@ function roadOf(el, frame) {
     sourceKey: `${el.type}/${el.id}`,
     points, width: width > 0 ? Math.min(width, 50) : lanes > 0 ? Math.min(lanes * 3.2, 50) : estimate,
     estimatedWidth: !(width > 0 || lanes > 0) && localRoad,
+    highway: tags.highway,
+    sidewalk: tags.sidewalk || null,
+    sidewalkLeft: tags['sidewalk:left'] || null,
+    sidewalkRight: tags['sidewalk:right'] || null,
   };
 }
 
 // Converts raw Overpass JSON into projected world-space data.
 export function parseOsm(json, frame, radius) {
-  const buildings = [], trees = [], areas = [], roads = [];
+  const buildings = [], trees = [], areas = [], roads = [], bridges = [], sidewalks = [], lamps = [], urbanAreas = [];
   const inRange = (x, z) => Math.abs(x) <= radius && Math.abs(z) <= radius;
 
   for (const el of json.elements || []) {
     const tags = el.tags || {};
     if (el.type === 'node') {
+      if (tags.highway === 'street_lamp') {
+        const p = frame.toLocal(el.lat, el.lon);
+        if (inRange(p.x, p.z)) lamps.push(p);
+        continue;
+      }
       if (tags.natural !== 'tree') continue;
       const { x, z } = frame.toLocal(el.lat, el.lon);
       if (!inRange(x, z)) continue;
@@ -227,8 +243,20 @@ export function parseOsm(json, frame, radius) {
     }
 
     if (el.type === 'way' && tags.highway) {
-      const road = roadOf(el, frame);
-      if (road) roads.push(road);
+      if (tags.highway === 'footway' && tags.footway === 'sidewalk') {
+        const points = (el.geometry || []).filter((p) => p && Number.isFinite(p.lat) && Number.isFinite(p.lon))
+          .map((p) => frame.toLocal(p.lat, p.lon));
+        if (points.length >= 2) sidewalks.push({ points, width: Math.min(5, Math.max(0.8, parseLength(tags.width) || 1.8)) });
+        continue;
+      }
+      const bridge = tags.bridge && tags.bridge !== 'no';
+      const road = roadOf(el, frame, bridge);
+      if (road) (bridge ? bridges : roads).push(road);
+      continue;
+    }
+
+    if (['residential', 'commercial', 'retail'].includes(tags.landuse)) {
+      for (const poly of polygonsOf(el, frame)) urbanAreas.push({ ...poly, bbox: ringBBox(poly.outer) });
       continue;
     }
 
@@ -243,7 +271,9 @@ export function parseOsm(json, frame, radius) {
         if (!inRange(cx, cz)) continue;
         buildings.push({
           id: el.id, sourceKey: `${el.type}/${el.id}`, isPart, ...poly, bbox, cx, cz, area, ...info,
-          color: cssColor(tags['building:colour']), roofColor: cssColor(tags['roof:colour']),
+          color: cssColor(tags['building:colour'] || tags['building:color'] || tags.colour) ||
+            MATERIAL_COLORS[tags['building:material']] || null,
+          roofColor: cssColor(tags['roof:colour'] || tags['roof:color']),
         });
       }
       continue;
@@ -256,5 +286,5 @@ export function parseOsm(json, frame, radius) {
       }
     }
   }
-  return { buildings, trees, areas, roads };
+  return { buildings, trees, areas, roads, bridges, sidewalks, lamps, urbanAreas };
 }

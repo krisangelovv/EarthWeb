@@ -65,6 +65,7 @@ export class Airsoft {
     this.cooldown = 0;
     this.recoil = 0;
     this.bob = 0;
+    this.onShot = () => {};
   }
 
   resize(aspect) {
@@ -80,13 +81,18 @@ export class Airsoft {
     const direction = camera.getWorldDirection(new THREE.Vector3());
     const target = camera.position.clone().addScaledVector(direction, 30);
     const velocity = target.sub(start).normalize().multiplyScalar(PELLET_SPEED);
-    const mesh = new THREE.Mesh(this.pelletGeometry, this.pelletMaterial);
-    mesh.position.copy(start);
-    this.pelletGroup.add(mesh);
-    this.pellets.push({ mesh, velocity, age: 0 });
+    this.spawnPellet(start, velocity);
+    this.onShot(start, velocity);
     this.cooldown = SHOT_INTERVAL;
     this.recoil = 1;
     return true;
+  }
+
+  spawnPellet(start, velocity) {
+    const mesh = new THREE.Mesh(this.pelletGeometry, this.pelletMaterial);
+    mesh.position.copy(start);
+    this.pelletGroup.add(mesh);
+    this.pellets.push({ mesh, velocity: velocity.clone(), age: 0 });
   }
 
   update(dt, world, moving) {

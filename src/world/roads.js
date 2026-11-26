@@ -126,7 +126,7 @@ export class RoadGrid {
         const ends = clip(road.points[i - 1], road.points[i], radius + road.width);
         if (!ends || Math.hypot(ends[1].x - ends[0].x, ends[1].z - ends[0].z) < 0.01) continue;
         const [a, b] = ends, half = road.width / 2;
-        const segment = { a, b, half };
+        const segment = { a, b, half, road };
         this.segments.push(segment);
         this.forCells([Math.min(a.x, b.x) - half, Math.min(a.z, b.z) - half,
           Math.max(a.x, b.x) + half, Math.max(a.z, b.z) + half], (key) => {
@@ -194,7 +194,7 @@ export class RoadGrid {
   }
 }
 
-function triangleIntersectsBuildings(a, b, c, grid) {
+export function triangleIntersectsBuildings(a, b, c, grid) {
   const cross = (p, q, r) => (q.x - p.x) * (r.z - p.z) - (q.z - p.z) * (r.x - p.x);
   const insideTriangle = (p) => {
     const values = [cross(a, b, p), cross(b, c, p), cross(c, a, p)];

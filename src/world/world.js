@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { CONFIG } from '../config.js';
 import { LocalFrame, bboxAround } from '../geo.js';
-import { loadMosaic } from '../data/tiles.js';
+import { loadMosaic, mosaicZoom } from '../data/tiles.js';
 import { loadElevation } from '../data/elevation.js';
 import { fetchOsm, parseOsm } from '../data/osm.js';
 import { fetchOverture, mergeOverture } from '../data/overture.js';
@@ -9,6 +9,8 @@ import { buildTerrain } from './terrain.js';
 import { buildBuildings } from './buildings.js';
 import { buildVegetation } from './vegetation.js';
 import { buildRoads } from './roads.js';
+import { buildBridges } from './bridges.js';
+import { buildStreetscape } from './streetscape.js';
 
 // Builds everything around (lat, lon): terrain from DEM, satellite texture, OSM buildings + vegetation.
 // `status(key, text, state)` reports progress to the UI. Missing optional data never aborts the load.
@@ -38,7 +40,8 @@ export async function loadWorld(lat, lon, { renderer, options, signal, status })
   };
 
   const imageryPromise = (async () => {
-    for (let zoom = CONFIG.imageryZoom; zoom >= 16; zoom--) {
+    const topZoom = mosaicZoom(tileBox, CONFIG.imageryZoom, maxTex);
+    for (let zoom = topZoom; zoom >= Math.min(16, topZoom); zoom--) {
       try {
         const mosaic = await loadMosaic({ template: S.imagery, bbox: tileBox, zoom, maxSize: maxTex, signal,
           requireComplete: true, rejectEsriNoData: true });
@@ -85,7 +88,12 @@ export async function loadWorld(lat, lon, { renderer, options, signal, status })
   const buildings = buildBuildings(osm.buildings, terrain, imagery.satellite
     ? { imagery, frame } : null);
   const roads = buildRoads(osm.roads, terrain, radius, buildings.footprints);
+  const bridges = buildBridges(osm.bridges || [], terrain, radius);
+  const streetscape = buildStreetscape({ roads: roads.grid, sidewalks: osm.sidewalks || [], lamps: osm.lamps || [],
+    urbanAreas: osm.urbanAreas || [], buildings: buildings.footprints, terrain, imagery, frame, radius });
   group.add(roads.group);
+  group.add(bridges.group);
+  group.add(streetscape.group);
   group.add(buildings.group);
   const vegetation = buildVegetation({
     trees: osm.trees, areas: osm.areas, buildingGrid: buildings.footprints, roadGrid: roads.grid, terrain, imagery, frame, radius,
@@ -98,7 +106,10 @@ export async function loadWorld(lat, lon, { renderer, options, signal, status })
   return {
     group, frame, radius, terrain, imagery, lat, lon,
     wallMaterial: buildings.wallMaterial,
-    heightAt: (x, z) => terrain.heightAt(x, z),
+    heightAt: (x, z, y) => {
+      const ground = terrain.heightAt(x, z);
+      return Number.isFinite(y) ? bridges.heightAt(x, z, y, ground) : ground;
+    },
     blocked: (x, z, r) => buildings.grid.blocked(x, z, r),
     stats: { roads: roads.count, buildings: buildings.count, trees: vegetation.count, osm: !!osmJson, overture: overtureUsed,
       overtureBuildings: osm.addedBuildings || 0, overtureRoads: osm.addedRoads || 0, overtureHeights: osm.enriched || 0,
