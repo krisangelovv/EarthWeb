@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EarthWeb — walk your hometown</title>
+  <link rel="stylesheet" href="css/style.css">
+  <script type="importmap">
+    { "imports": {
+        "three": "./vendor/three/three.module.js",
+        "three/addons/": "./vendor/three/"
+    } }
+  </script>
+</head>
+<body>
+  <canvas id="view"></canvas>
+
+  <div id="crosshair"></div>
+  <div id="hud" hidden>
+    <div id="hud-place"></div>
+    <div id="hud-pos"></div>
+    <div id="hud-env"></div>
+    <div id="hud-map"></div>
+  </div>
+  <canvas id="minimap" width="180" height="180" hidden></canvas>
+  <div id="toast" hidden></div>
+  <div id="credits">Imagery © Esri &amp; partners · Map data © OpenStreetMap contributors, Overture Maps Foundation · Elevation: Mapzen / AWS Terrain Tiles · Weather: Open-Meteo</div>
+
+  <div id="loading" class="overlay" hidden>
+    <div class="panel narrow">
+      <h2 id="loading-title">Building your world…</h2>
+      <ul id="status"></ul>
+      <button id="loading-retry" hidden>Back to menu</button>
+    </div>
+  </div>
+
+  <div id="menu" class="overlay">
+    <div class="panel">
+      <h1>EarthWeb</h1>
+      <p class="sub">A walkable, real-world map: satellite ground, real elevation, OpenStreetMap and Overture buildings and roads, trees, live weather and the real sun.</p>
+
+      <section>
+        <h3>Location</h3>
+        <form id="search-form">
+          <input id="q" type="search" placeholder="Your hometown, street or landmark…" autocomplete="off">
+          <button type="submit">Search</button>
+        </form>
+        <ul id="results"></ul>
+        <div class="row">
+          <button id="gps" type="button">Use my GPS position</button>
+          <label><input id="follow" type="checkbox"> Follow my GPS live</label>
+        </div>
+      </section>
+
+      <section>
+        <h3>Time &amp; weather</h3>
+        <div class="row">
+          <label><input id="live" type="checkbox" checked> Live clock</label>
+          <input id="hour" type="range" min="0" max="24" step="0.05" value="12">
+          <span id="hour-label">12:00</span>
+          <select id="speed" title="Time speed">
+            <option value="1">×1</option><option value="60">×60</option><option value="600">×600</option>
+          </select>
+        </div>
+        <div class="row">
+          <label>Weather
+            <select id="wx">
+              <option value="live">Live (Open-Meteo)</option>
+              <option value="clear">Clear</option><option value="cloudy">Overcast</option>
+              <option value="fog">Fog</option><option value="rain">Rain</option>
+              <option value="snow">Snow</option><option value="storm">Thunderstorm</option>
+            </select>
+          </label>
+        </div>
+      </section>
+
+      <section>
+        <h3>World</h3>
+        <div class="row">
+          <label>Radius
+            <select id="radius"><option value="500">500 m</option><option value="1000" selected>1000 m</option><option value="2000">2000 m</option></select>
+          </label>
+          <label><input id="infer" type="checkbox" checked> Infer trees from satellite</label>
+          <label><input id="shadows" type="checkbox" checked> Shadows</label>
+          <button id="reload" type="button">Reload here</button>
+        </div>
+      </section>
+
+      <section>
+        <h3>Multiplayer (2 players)</h3>
+        <p class="sub">Create a room or join a friend. Joining loads the host's location. Share your code only with someone you trust.</p>
+        <div class="row">
+          <button id="mp-host" type="button">Create room</button>
+          <input id="mp-code" type="text" placeholder="Room code" autocomplete="off" spellcheck="false" maxlength="24" aria-label="Room code">
+          <button id="mp-join" type="button">Join room</button>
+          <button id="mp-leave" type="button">Disconnect</button>
+        </div>
+        <p id="mp-status" class="sub" role="status">Not connected.</p>
+        <p class="sub">Your position and IP address are shared with the other player. A public signalling service and STUN server help connect you.</p>
+      </section>
+
+      <p class="keys"><b>W A S D</b> walk · <b>Shift</b> run · <b>Space</b> jump · <b>F</b> fly (Space / C up / down) · <b>Left click</b> fire toy pellets · <b>Esc</b> menu</p>
+      <button id="walk" class="primary" type="button" disabled>Loading…</button>
+    </div>
+  </div>
+
+  <script type="module" src="src/main.js"></script>
+</body>
+</html>
