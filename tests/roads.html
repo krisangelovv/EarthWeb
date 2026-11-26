@@ -1,0 +1,392 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Road tests</title>
+  <script type="importmap">
+    { "imports": { "three": "../vendor/three/three.module.js" } }
+  </script>
+</head>
+<body>
+  <pre id="result">Running...</pre>
+  <script type="module">
+    import * as THREE from 'three';
+    import { LocalFrame, inPolygon, PolygonGrid } from '../src/geo.js';
+    import { parseOsm } from '../src/data/osm.js';
+    import { mergeOverture } from '../src/data/overture.js';
+    import { loadMosaic } from '../src/data/tiles.js';
+    import { RoadGrid, buildRoads } from '../src/world/roads.js';
+    import { buildBuildings } from '../src/world/buildings.js';
+    import { buildVegetation } from '../src/world/vegetation.js';
+
+    const check = (condition, message) => { if (!condition) throw new Error(message); };
+    const frame = new LocalFrame(42, 23);
+    const geometry = [frame.toGeo(-50, 0), frame.toGeo(50, 0)];
+    const osm = parseOsm({ elements: [
+      { type: 'way', tags: { highway: 'residential', width: '8' }, geometry },
+      { type: 'way', tags: { highway: 'primary', bridge: 'yes' }, geometry },
+      { type: 'way', tags: { highway: 'service', surface: 'gravel' }, geometry },
+      { type: 'way', tags: { highway: 'secondary', lanes: '2' }, geometry },
+    ] }, frame, 100);
+    check(osm.roads.length === 2 && osm.roads[0].width === 8 && osm.roads[1].width === 6.4,
+      'road parsing must use widths and lanes and skip bridges and gravel');
+    check(!osm.roads[0].estimatedWidth && !osm.roads[1].estimatedWidth,
+      'explicit widths and lane counts must not be replaced by wall estimates');
+    const defaults = parseOsm({ elements: [
+      { type: 'way', tags: { highway: 'residential' }, geometry },
+      { type: 'way', tags: { highway: 'residential', oneway: 'yes' }, geometry },
+      { type: 'way', tags: { highway: 'primary', oneway: 'yes' }, geometry },
+      { type: 'way', tags: { highway: 'residential', width: 'variable', 'width:carriageway': '9' }, geometry },
+    ] }, frame, 100);
+    check(defaults.roads[0].width === 6.5 && defaults.roads[1].width === 4 &&
+      defaults.roads[2].width === 9 && defaults.roads[3].width === 9,
+      'road widths use carriageway tags and distinguish local one-way streets from larger roads');
+    const ringGeo = (ring) => {
+      const points = ring.map(([x, z]) => { const p = frame.toGeo(x, z); return [p.lon, p.lat]; });
+      return [...points, points[0]];
+    };
+    const osmRing = (ring) => ringGeo(ring).map(([lon, lat]) => ({ lat, lon }));
+    const mapItems = parseOsm({ elements: [
+      { type: 'way', id: 101, tags: { building: 'house', 'roof:colour': '#ff0000' },
+        geometry: osmRing([[0,0], [10,0], [10,10], [0,10]]) },
+      { type: 'way', id: 104, tags: { building: 'apartments', 'building:levels': '4' },
+        geometry: osmRing([[20,0], [30,0], [30,10], [20,10]]) },
+      { type: 'way', id: 501, tags: { highway: 'residential', width: '8' }, geometry },
+    ] }, frame, 100);
+    const source = (id) => JSON.stringify([{ provider: 'osm', record_id: `w${id}@1` }]);
+    const overtureBuilding = (id, ring, properties = {}) => ({ layer: 'building',
+      properties: { id, ...properties }, geometry: { type: 'Polygon', coordinates: [ringGeo(ring)] } });
+    const overtureRoad = (id, points, properties = {}) => ({ layer: 'segment',
+      properties: { id, subtype: 'road', class: 'residential', ...properties },
+      geometry: { type: 'LineString', coordinates: points.map(([x,z]) => {
+        const p = frame.toGeo(x, z); return [p.lon, p.lat];
+      }) } });
+    const mixed = mergeOverture(mapItems, { buildings: [
+      overtureBuilding('matched', [[0,0], [10,0], [10,10], [0,10]], { sources: source(101), height: 13 }),
+      overtureBuilding('floors', [[20,0], [30,0], [30,10], [20,10]], { sources: source(104), height: 22 }),
+      overtureBuilding('overlap', [[0,0], [10,0], [10,10], [0,10]]),
+      overtureBuilding('new', [[40,20], [50,20], [50,30], [40,30]],
+        { class: 'house', height: 8, min_height: 1, roof_shape: 'gabled', roof_color: '#123456' }),
+    ], roads: [
+      overtureRoad('matched-road', [[-40,0], [40,0]], { sources: source(501) }),
+      overtureRoad('overlap-road', [[-40,1], [40,1]]),
+      overtureRoad('new-road', [[0,-40], [0,40]], { width_rules: '[{"value":7}]' }),
+      overtureRoad('bridge', [[10,-40], [10,40]], { road_flags: '[{"values":["is_bridge"]}]' }),
+      overtureRoad('gravel', [[20,-40], [20,40]], { road_surface: '[{"value":"gravel"}]' }),
+      overtureRoad('far-road', [[500,500], [600,500]]),
+    ] }, frame, 100);
+    check(mixed.buildings.length === 3 && mixed.enriched === 1 && mixed.addedBuildings === 1 &&
+      mixed.buildings[0].height === 13 && mixed.buildings[0].roofColor === '#ff0000' &&
+      mixed.buildings[1].height === 12 && mapItems.buildings[0].guessed,
+      'Overture should fill guessed heights without overriding OSM details, duplicating buildings, or mutating input');
+    check(mixed.buildings[2].height === 8 && mixed.buildings[2].minHeight === 1 &&
+      mixed.buildings[2].roofShape === 'gabled' && mixed.buildings[2].roofColor === '#123456',
+      'new Overture buildings must preserve heights and mapped roof attributes');
+    check(mixed.roads.length === 2 && mixed.addedRoads === 1 && mixed.roads[0].width === 8 &&
+      mixed.roads[1].width === 7,
+      'Overture must add crossing roads without duplicating mapped roads or rendering bridges and gravel');
+    const standalone = mergeOverture({ buildings: [], roads: [], trees: [], areas: [] }, {
+      buildings: [overtureBuilding('alone', [[40,20], [50,20], [50,30], [40,30]])],
+      roads: [overtureRoad('alone-road', [[0,-40], [0,40]])],
+    }, frame, 100);
+    check(standalone.buildings.length === 1 && standalone.roads.length === 1,
+      'Overture buildings and roads should work without an OSM response');
+    const roads = new RoadGrid([osm.roads[0]], 100);
+    const poly = (x1, z1, x2, z2, holes = []) => ({
+      outer: [[x1,z1], [x2,z1], [x2,z2], [x1,z2]], holes, bbox: [x1,z1,x2,z2],
+    });
+    check(roads.intersectsPolygon(poly(-5, -8, 5, 8)), 'building crossing a road');
+    check(roads.intersectsPolygon(poly(-5, 3, 5, 8)), 'building edge overlapping a road');
+    check(!roads.intersectsPolygon(poly(-5, 5, 5, 8)), 'building outside a road');
+    const shortRoad = new RoadGrid([{ points: [{x:-2,z:0}, {x:2,z:0}], width: 2 }], 100);
+    check(!shortRoad.intersectsPolygon(poly(-10, -10, 10, 10, [[[-5,-5], [5,-5], [5,5], [-5,5]]])),
+      'a road within a courtyard must not intersect the building');
+
+    const building = {
+      ...poly(5, 3, 15, 9), id: 1, cx: 10, cz: 6, area: 60,
+      isPart: false, height: 12, minHeight: 0,
+    };
+    const terrain = { heightAt: () => 0 };
+    const built = buildBuildings([building], terrain);
+    const renderedRoads = buildRoads([osm.roads[0]], terrain, 100, built.footprints);
+    check(built.count === 1 && built.group.children.length > 0 && built.grid.contains(10, 4),
+      'a building overlapping an estimated road must remain 3D and collidable');
+    const positions = renderedRoads.group.children[0].geometry.attributes.position;
+    let minZ = Infinity, maxZ = -Infinity;
+    for (let i = 0; i < positions.count; i++) {
+      const x = positions.getX(i), z = positions.getZ(i);
+      check(!inPolygon(x, z, building), 'road mesh enters a building footprint');
+      minZ = Math.min(minZ, z);
+      maxZ = Math.max(maxZ, z);
+    }
+    check(Math.abs((maxZ - minZ) - 8) < 0.01, 'road mesh width must match the tagged width in metres');
+
+    const streetWalls = new PolygonGrid();
+    streetWalls.add(poly(-40, 8, 40, 20));
+    streetWalls.add(poly(-40, -20, 40, -8));
+    const emptyBuildings = new PolygonGrid();
+    const street = { points: [{ x: -30, z: 0 }, { x: 30, z: 0 }], width: 6.5, estimatedWidth: true };
+    const measured = buildRoads([street], terrain, 100, streetWalls);
+    check(Math.abs(measured.grid.segments[0].half * 2 - 9.6) < 0.001,
+      'consistent building walls should estimate carriageway width without counting sidewalks');
+    const explicit = buildRoads([{ ...street, width: 7, estimatedWidth: false }], terrain, 100, streetWalls);
+    check(explicit.grid.segments[0].half * 2 === 7, 'mapped road width must override wall estimates');
+    const open = buildRoads([street], terrain, 100, emptyBuildings);
+    check(open.grid.segments[0].half * 2 === 6.5, 'roads without consistently paired walls keep their default width');
+    const oneSided = new PolygonGrid();
+    oneSided.add(poly(-40, 8, 40, 20));
+    check(buildRoads([street], terrain, 100, oneSided).grid.segments[0].half * 2 === 6.5,
+      'a wall on only one side must not determine a road width');
+    const offsetWalls = new PolygonGrid();
+    offsetWalls.add(poly(-40, 4, 40, 20));
+    offsetWalls.add(poly(-40, -20, 40, -12));
+    const offset = buildRoads([street], terrain, 100, offsetWalls);
+    check(Math.abs(offset.grid.segments[0].half * 2 - 7.4) < 0.001,
+      'off-centre roads must keep clearance from the nearer wall');
+    const junction = buildRoads([
+      { points: [{ x: -30, z: 0 }, { x: 0, z: 0 }, { x: 30, z: 0 }], width: 8 },
+      { points: [{ x: 0, z: 0 }, { x: 0, z: 30 }], width: 8 },
+    ], terrain, 100, emptyBuildings);
+    const jp = junction.group.children[0].geometry.attributes.position;
+    const containsTriangle = (x, z) => {
+      for (let i = 0; i < jp.count; i += 3) {
+        const cross = (a, b) => (jp.getX(b) - jp.getX(a)) * (z - jp.getZ(a)) -
+          (jp.getZ(b) - jp.getZ(a)) * (x - jp.getX(a));
+        const sides = [cross(i, i + 1), cross(i + 1, i + 2), cross(i + 2, i)];
+        if (sides.every((n) => n >= -1e-6) || sides.every((n) => n <= 1e-6)) return true;
+      }
+      return false;
+    };
+    check(containsTriangle(0, 0) && containsTriangle(3, 3) && junction.grid.intersectsDisc(3, 3),
+      'connected junctions must be filled and included in vegetation clearance');
+    check(!containsTriangle(7, -7), 'junctions must not add asphalt far outside their connected arms');
+
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = 256;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#206020';
+    ctx.fillRect(0, 0, 256, 256);
+    const roofCanvas = document.createElement('canvas');
+    roofCanvas.width = roofCanvas.height = 256;
+    const roofCtx = roofCanvas.getContext('2d');
+    roofCtx.fillStyle = '#206020';
+    roofCtx.fillRect(0, 0, 256, 256);
+    roofCtx.fillStyle = '#b34232';
+    roofCtx.fillRect(133, 131, 10, 6);
+    roofCtx.fillStyle = '#111111';
+    roofCtx.fillRect(137, 133, 2, 1);
+    const roofProjection = {
+      imagery: { canvas: roofCanvas, width: 256, height: 256, toPixel: (lat, lon) => ({ x: lon + 128, y: 128 - lat }) },
+      frame: { toGeo: (x, z) => ({ lat: -z, lon: x }) },
+    };
+    const tagged = { ...building, id: 2, roofColor: '#ff0000' };
+    const sampled = buildBuildings([building, tagged], terrain, roofProjection);
+    const roofMesh = sampled.group.children.find((mesh) => !mesh.material.map);
+    check(roofMesh && !roofMesh.material.map, 'roof must not use a satellite texture');
+    const roofPosition = roofMesh.geometry.attributes.position, roofColors = roofMesh.geometry.attributes.color;
+    const red = new THREE.Color('#b34232'), taggedRed = new THREE.Color('#ff0000');
+    for (let i = 0; i < roofPosition.count; i++) {
+      const expected = i < 6 ? red : taggedRed;
+      check(Math.abs(roofPosition.getY(i) - building.height) < 0.001, 'roof must retain building height');
+      check(Math.abs(roofColors.getX(i) - expected.r) < 0.001 && Math.abs(roofColors.getY(i) - expected.g) < 0.001 &&
+        Math.abs(roofColors.getZ(i) - expected.b) < 0.001,
+        'roof must have one sampled color, with tagged colors taking precedence');
+    }
+    const outOfBounds = { ...roofProjection, frame: { toGeo: () => ({ lat: 10000, lon: 10000 }) } };
+    const fallbackRoof = buildBuildings([building], terrain, outOfBounds).group.children.find((mesh) => !mesh.material.map);
+    const originalRoof = built.group.children.find((mesh) => !mesh.material.map);
+    check(fallbackRoof.geometry.attributes.color.getX(0) === originalRoof.geometry.attributes.color.getX(0),
+      'unavailable imagery must fall back to the normal roof palette');
+    const houseOutline = poly(-6, -4, 6, 4);
+    const houseGeometry = houseOutline.outer.map(([x, z]) => frame.toGeo(x, z));
+    houseGeometry.push(houseGeometry[0]);
+    const parsedHouse = parseOsm({ elements: [{
+      type: 'way', id: 20, tags: { building: 'house', height: '9', 'roof:shape': 'gabled',
+        'roof:height': '2', 'roof:orientation': 'across', 'roof:direction': 'E' }, geometry: houseGeometry,
+    }] }, frame, 100).buildings[0];
+    check(parsedHouse.roofShape === 'gabled' && parsedHouse.roofHeight === 2 &&
+      parsedHouse.roofOrientation === 'across' && parsedHouse.roofDirection === 'E',
+      'OSM roof shape, height and orientation must be parsed');
+    const house = { ...houseOutline, id: 20, cx: 0, cz: 0, area: 96, kind: 'house',
+      isPart: false, height: 9, minHeight: 0 };
+    const roofOf = (b, imagery = null) => {
+      const result = buildBuildings([b], terrain, imagery);
+      return result.group.children.find((mesh) => !mesh.material.map).geometry;
+    };
+    const heightsOf = (geometry) => Array.from({ length: geometry.attributes.position.count },
+      (_, i) => geometry.attributes.position.getY(i));
+    const guessedRoof = roofOf(house, roofProjection);
+    let roofHeights = heightsOf(guessedRoof);
+    check(Math.min(...roofHeights) < 9 && Math.max(...roofHeights) === 9 &&
+      guessedRoof.attributes.position.count === 12, 'small untagged houses should get a four-sided pyramid within their height');
+    for (let i = 0; i < guessedRoof.attributes.position.count; i++) {
+      const color = guessedRoof.attributes.color, n = guessedRoof.attributes.normal;
+      check(color.getX(i) === color.getX(0) && color.getY(i) === color.getY(0) &&
+        color.getZ(i) === color.getZ(0) && n.getY(i) > 0,
+        'pitched roofs must have uniform color and upward-facing normals');
+    }
+    const houseFlat = roofOf({ ...house, roofShape: 'flat' });
+    check(heightsOf(houseFlat).every((h) => h === 9), 'explicit flat roofs must not be guessed as pyramids');
+    const apartments = roofOf({ ...house, kind: 'apartments', height: 20 });
+    check(heightsOf(apartments).every((h) => h === 20), 'apartment roofs should stay flat without roof tags');
+    const large = roofOf({ ...house, bbox: [-25, -25, 25, 25], area: 2500, kind: 'yes' });
+    check(heightsOf(large).every((h) => h === 9), 'large untagged footprints should stay flat');
+    const gabled = roofOf({ ...house, roofShape: 'gabled', roofHeight: 2, roofDirection: 'E' });
+    roofHeights = heightsOf(gabled);
+    check(Math.min(...roofHeights) === 7 && Math.max(...roofHeights) === 9 && gabled.attributes.position.count === 12,
+      'mapped gabled roofs must use the tagged height');
+    const mappedApartment = roofOf({ ...house, kind: 'apartments', height: 20, roofShape: 'gabled', roofHeight: 3 });
+    check(heightsOf(mappedApartment).includes(17), 'mapped roof shapes must override apartment estimates');
+    const gp = gabled.attributes.position;
+    const ridge = Array.from({ length: gp.count }, (_, i) => [gp.getX(i), gp.getY(i), gp.getZ(i)])
+      .filter((p) => p[1] === 9);
+    check(ridge.every((p) => Math.abs(p[0]) < 0.001), 'mapped roof direction must orient the gable ridge');
+    const hipped = roofOf({ ...house, roofShape: 'hipped', roofHeight: 2 });
+    check(heightsOf(hipped).some((h) => h === 7) && hipped.attributes.position.count === 18,
+      'mapped hipped roofs should include four sloped sides');
+    const skillion = roofOf({ ...house, roofShape: 'skillion', roofHeight: 2, roofDirection: 'E' });
+    const sp = skillion.attributes.position;
+    for (let i = 0; i < sp.count; i++)
+      check(Math.abs(sp.getY(i) - (8 - sp.getX(i) / 6)) < 0.001, 'skillion must slope east by its mapped height');
+    const dome = roofOf({ ...house, roofShape: 'dome', roofHeight: 2 });
+    check(dome.attributes.position.count > 12 && heightsOf(dome).some((h) => h > 7 && h < 9),
+      'mapped domes should have a curved profile');
+    const courtyard = { ...house, holes: [[[-2,-2], [-2,2], [2,2], [2,-2]]], roofShape: 'pyramidal' };
+    check(heightsOf(roofOf(courtyard)).every((h) => h === 9), 'complex roofs must fall back without covering courtyards');
+    roofCtx.fillStyle = '#b34232';
+    roofCtx.fillRect(122, 124, 12, 8);
+    roofCtx.fillStyle = '#206020';
+    roofCtx.fillRect(126, 126, 4, 4);
+    const courtyardColors = roofOf(courtyard, roofProjection).attributes.color;
+    check(Math.abs(courtyardColors.getX(0) - red.r) < 0.001 && Math.abs(courtyardColors.getY(0) - red.g) < 0.001,
+      'roof color sampling must exclude courtyard pixels');
+    const mixedCanvas = document.createElement('canvas');
+    mixedCanvas.width = mixedCanvas.height = 256;
+    const mixedCtx = mixedCanvas.getContext('2d');
+    mixedCtx.fillStyle = '#b34232';
+    mixedCtx.fillRect(0, 0, 256, 256);
+    mixedCtx.fillStyle = '#206020';
+    mixedCtx.fillRect(122, 124, 5, 8);
+    mixedCtx.fillStyle = '#111111';
+    mixedCtx.fillRect(127, 124, 2, 8);
+    const mixedProjection = { ...roofProjection, imagery: { ...roofProjection.imagery, canvas: mixedCanvas } };
+    const mixedColors = roofOf({ ...house, roofShape: 'flat' }, mixedProjection).attributes.color;
+    check(Math.abs(mixedColors.getX(0) - red.r) < 0.001 && Math.abs(mixedColors.getY(0) - red.g) < 0.001,
+      'vegetation and deep shadows must not tint a partially visible roof');
+    mixedCtx.fillStyle = '#206020';
+    mixedCtx.fillRect(0, 0, 256, 256);
+    const obscured = roofOf({ ...house, roofShape: 'flat' }, mixedProjection).attributes.color;
+    const generic = roofOf({ ...house, roofShape: 'flat' }).attributes.color;
+    check(obscured.getX(0) === generic.getX(0) && obscured.getY(0) === generic.getY(0),
+      'mostly obscured roofs must use the generic palette rather than tree green');
+    const lShape = { ...house, outer: [[-6,-4], [6,-4], [6,0], [0,0], [0,4], [-6,4]],
+      area: 72, roofShape: 'gabled', roofHeight: 2 };
+    for (const shape of ['gabled', 'hipped', 'skillion']) {
+      const roof = roofOf({ ...lShape, roofShape: shape, roofDirection: 'E' });
+      const pos = roof.attributes.position, normal = roof.attributes.normal;
+      let projectedArea = 0, low = Infinity, high = -Infinity;
+      for (let i = 0; i < pos.count; i += 3) {
+        const x0 = pos.getX(i), z0 = pos.getZ(i), x1 = pos.getX(i + 1), z1 = pos.getZ(i + 1);
+        const x2 = pos.getX(i + 2), z2 = pos.getZ(i + 2);
+        projectedArea += Math.abs((x1 - x0) * (z2 - z0) - (z1 - z0) * (x2 - x0)) / 2;
+        for (let j = i; j < i + 3; j++) {
+          low = Math.min(low, pos.getY(j)); high = Math.max(high, pos.getY(j));
+          check(normal.getY(j) > 0 && pos.getY(j) >= 7 - 1e-5 && pos.getY(j) <= 9 + 1e-5,
+            'complex roof faces must point upwards and stay within the building height');
+          if (shape === 'skillion') check(Math.abs(pos.getY(j) - (8 - pos.getX(j) / 6)) < 1e-5,
+            'complex skillion must follow its mapped direction');
+        }
+      }
+      check(Math.abs(projectedArea - 72) < 0.001 && low < high && high === 9,
+        `${shape} roof must cover the concave footprint once and retain the mapped height`);
+    }
+    const inferredL = roofOf({ ...lShape, roofShape: null });
+    check(Math.min(...heightsOf(inferredL)) < Math.max(...heightsOf(inferredL)),
+      'small concave houses should have a pitched estimated roof');
+    const uShape = { ...house, outer: [[-6,-4], [6,-4], [6,4], [3,4], [3,-1], [-3,-1], [-3,4], [-6,4]],
+      area: 66, roofShape: 'hipped', roofHeight: 2 };
+    check(heightsOf(roofOf(uShape)).every((y) => y === 9),
+      'complex roofs that cannot reach the mapped height must safely fall back to flat');
+    const vegetation = buildVegetation({
+      trees: [{ x: 0, z: 0, h: 8 }, { x: 0, z: 10, h: 8 }],
+      areas: [{ ...poly(-40, -40, 40, 40), kind: 'wood' }],
+      buildingGrid: new PolygonGrid(), roadGrid: roads, terrain: { heightAt: () => 0 },
+      imagery: { canvas, width: 256, height: 256, toPixel: (lat, lon) => ({x: lon + 128, y: 128 - lat}) },
+      frame: { toGeo: (x, z) => ({ lat: -z, lon: x }) },
+      radius: 60, maxTrees: 5000, inferFromImagery: true,
+    });
+    const matrix = new THREE.Matrix4(), position = new THREE.Vector3(), scale = new THREE.Vector3(), rotation = new THREE.Quaternion();
+    let tested = 0;
+    for (const mesh of vegetation.group.children) {
+      if (!mesh.isInstancedMesh || mesh.geometry.type === 'CylinderGeometry') continue;
+      for (let i = 0; i < mesh.count; i++) {
+        mesh.getMatrixAt(i, matrix);
+        matrix.decompose(position, rotation, scale);
+        check(!roads.intersectsDisc(position.x, position.z, scale.x), 'tree canopy overlaps road');
+        tested++;
+      }
+    }
+    check(tested > 1, 'expected tagged, scattered and inferred vegetation');
+    const crowns = vegetation.group.children.filter((mesh) => mesh.isInstancedMesh && mesh.geometry.type !== 'CylinderGeometry');
+    check(crowns.length >= 4 && crowns.every((mesh) => mesh.material.map && !mesh.material.flatShading),
+      'trees should have varied, smoothly shaded and textured crowns');
+    const grassPoly = poly(-40, -40, 40, 40);
+    const grassGeometry = grassPoly.outer.map(([x, z]) => frame.toGeo(x, z));
+    grassGeometry.push(grassGeometry[0]);
+    const grassOsm = parseOsm({ elements: [
+      { type: 'way', tags: { landuse: 'grass' }, geometry: grassGeometry },
+    ] }, frame, 100);
+    check(grassOsm.areas.length === 1 && grassOsm.areas[0].kind === 'grass', 'mapped grass must be recognized');
+    const footprints = new PolygonGrid();
+    footprints.add(building);
+    const grass = buildVegetation({
+      trees: [], areas: grassOsm.areas, buildingGrid: footprints, roadGrid: roads,
+      terrain, frame, radius: 60, maxTrees: 500, inferFromImagery: false,
+    });
+    check(grass.count === 0 && grass.grassCount > 0, 'grassland should grow grass, not trees');
+    const grassMesh = grass.group.children.find((child) => child.isGroup).children[0];
+    for (let i = 0; i < grassMesh.count; i++) {
+      grassMesh.getMatrixAt(i, matrix);
+      matrix.decompose(position, rotation, scale);
+      check(!roads.intersectsDisc(position.x, position.z, 1.1), 'grass overlaps road');
+      check(!footprints.blocked(position.x, position.z, 1.1), 'grass overlaps building');
+    }
+    const inferredGrass = buildVegetation({
+      trees: [], areas: [], buildingGrid: footprints, roadGrid: roads, terrain,
+      imagery: { canvas, width: 256, height: 256, toPixel: (lat, lon) => ({x: lon + 128, y: 128 - lat}) },
+      frame: { toGeo: (x, z) => ({ lat: -z, lon: x }) },
+      radius: 60, maxTrees: 500, inferFromImagery: false, grassFromImagery: true,
+    });
+    check(inferredGrass.grassCount > 0, 'green satellite imagery should produce grass even without mapped areas');
+
+    const originalFetch = window.fetch;
+    const tile = document.createElement('canvas');
+    tile.width = tile.height = 256;
+    const tileCtx = tile.getContext('2d');
+    tileCtx.fillStyle = '#ccc';
+    tileCtx.fillRect(0, 0, 256, 256);
+    tileCtx.fillStyle = '#fff';
+    for (const [x, y] of [[70, 111], [80, 110], [128, 128]]) tileCtx.fillRect(x, y, 1, 1);
+    const placeholder = await new Promise((resolve) => tile.toBlob(resolve));
+    tileCtx.fillStyle = '#808080';
+    tileCtx.fillRect(0, 0, 256, 256);
+    const uniform = await new Promise((resolve) => tile.toBlob(resolve));
+    try {
+      window.fetch = async () => new Response(placeholder);
+      let rejected = false;
+      try {
+        await loadMosaic({ template: 'test/{z}/{x}/{y}', bbox: { north: 42, south: 42, west: 23, east: 23 },
+          zoom: 19, requireComplete: true, rejectEsriNoData: true });
+      } catch { rejected = true; }
+      check(rejected, 'Esri no-data tiles must be rejected');
+      window.fetch = async () => new Response(uniform);
+      const valid = await loadMosaic({ template: 'test/{z}/{x}/{y}', bbox: { north: 42, south: 42, west: 23, east: 23 },
+        zoom: 18, requireComplete: true, rejectEsriNoData: true });
+      check(valid.loaded === 1, 'uniform imagery must not be mistaken for the Esri placeholder');
+    } finally {
+      window.fetch = originalFetch;
+    }
+    document.getElementById('result').textContent = `PASS: road, imagery, building, tree and grass checks (${tested} trees, ${grass.grassCount} grass patches)`;
+  </script>
+</body>
+</html>

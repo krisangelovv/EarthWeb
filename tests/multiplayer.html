@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Multiplayer tests</title>
+  <script type="importmap">
+    { "imports": { "three": "../vendor/three/three.module.js" } }
+  </script>
+</head>
+<body>
+  <pre id="result">Running...</pre>
+  <script type="module">
+    import * as THREE from 'three';
+    import { Multiplayer } from '../src/multiplayer.js';
+    import { LocalFrame } from '../src/geo.js';
+
+    const check = (condition, message) => { if (!condition) throw new Error(message); };
+    class Events {
+      constructor() { this.handlers = {}; }
+      on(event, handler) { this.handlers[event] = handler; }
+      emit(event, ...args) { this.handlers[event]?.(...args); }
+    }
+    class FakeConnection extends Events {
+      constructor() { super(); this.open = false; this.messages = []; }
+      send(data) { this.messages.push(data); }
+      close() { this.open = false; this.emit('close'); }
+    }
+    class FakePeer extends Events {
+      constructor(id) { super(); this.id = id; FakePeer.last = this; }
+      connect(id) { this.target = id; return this.outgoing = new FakeConnection(); }
+      destroy() { this.destroyed = true; }
+    }
+    let position = null, joined = null, status = '';
+    const scene = new THREE.Scene();
+    const mp = new Multiplayer({
+      scene, getPosition: () => position, onJoinLocation: (p) => { joined = p; },
+      onStatus: (message) => { status = message; }, loadPeer: async () => FakePeer,
+    });
+    const original = { lat: 42, lon: 23, height: 2, yaw: 1 };
+    const world = { frame: new LocalFrame(42, 23), radius: 1000, heightAt: () => 10 };
+    await mp.start('host');
+    const host = FakePeer.last;
+    host.emit('open');
+    check(host.id.startsWith('earthweb-') && host.id.length === 33, 'host needs a random room code');
+    const incoming = new FakeConnection();
+    host.emit('connection', incoming);
+    incoming.open = true;
+    incoming.emit('open');
+    mp.update(0.1, world, 1000);
+    check(incoming.messages.length === 0, 'loading host must wait before sending welcome');
+    position = original;
+    mp.update(0.1, world, 1100);
+    check(incoming.messages[0].type === 'welcome', 'host must send welcome when position becomes available');
+    const extra = new FakeConnection();
+    host.emit('connection', extra);
+    check(!extra.open && mp.connection === incoming, 'room must accept only one player');
+    incoming.emit('data', { type: 'position', position: original });
+    mp.update(0.1, world);
+    check(mp.avatar.visible && mp.avatar.position.y === 12 && mp.avatar.rotation.y === 1,
+      'remote avatar must use the current world frame and ground');
+    const recentered = { frame: new LocalFrame(42, 23.001), radius: 1000, heightAt: () => 20 };
+    mp.update(0.1, recentered);
+    check(mp.avatar.visible && mp.avatar.position.x < -80 && mp.avatar.position.y === 22,
+      'remote avatar must snap into the new frame when the world changes');
+    incoming.emit('data', { type: 'position', position: { ...original, lat: NaN } });
+    check(mp.remote.lat === 42, 'invalid position must be ignored');
+    mp.update(0.1, world, mp.remote.received + 3001);
+    check(!mp.avatar.visible, 'stale player must be hidden');
+    mp.disconnect();
+    check(host.destroyed && !mp.avatar.visible, 'disconnect must clean up');
+
+    let rejected = false;
+    try { await mp.start('join', 'bad-code'); } catch { rejected = true; }
+    check(rejected, 'invalid room codes must be rejected');
+    await mp.start('join', '0123456789abcdef01234567');
+    const joiner = FakePeer.last;
+    joiner.emit('open');
+    check(joiner.target === 'earthweb-0123456789abcdef01234567', 'joiner must connect to the requested host');
+    joiner.outgoing.open = true;
+    joiner.outgoing.emit('open');
+    joiner.outgoing.emit('data', { type: 'welcome', position: original });
+    joiner.outgoing.emit('data', { type: 'welcome', position: { ...original, lat: 43 } });
+    check(joined.lat === 42, 'joiner should load the host location only once');
+    joiner.outgoing.emit('close');
+    check(status === 'Player disconnected.' && !mp.avatar.visible, 'disconnect must be reported');
+    document.getElementById('result').textContent = 'PASS: multiplayer connection and player state';
+  </script>
+</body>
+</html>

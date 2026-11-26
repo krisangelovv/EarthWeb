@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Player tests</title>
+  <script type="importmap">
+    { "imports": { "three": "../vendor/three/three.module.js" } }
+  </script>
+</head>
+<body>
+  <pre id="result">Running...</pre>
+  <script type="module">
+    import * as THREE from 'three';
+    import { Airsoft } from '../src/airsoft.js';
+
+    const check = (condition, message) => { if (!condition) throw new Error(message); };
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera();
+    camera.position.set(4, 3, 5);
+    camera.rotation.set(0, Math.PI / 2, 0, 'YXZ');
+    const airsoft = new Airsoft(scene);
+    const world = { radius: 100, heightAt: () => -100 };
+
+    check(airsoft.shoot(camera), 'first shot should spawn a pellet');
+    check(airsoft.pellets.length === 1 && scene.children.includes(airsoft.pelletGroup),
+      'pellet must be visible in the world scene');
+    check(airsoft.pellets[0].velocity.x < -30, 'pellet must follow camera direction');
+    check(!airsoft.shoot(camera) && airsoft.pellets.length === 1, 'firing must respect its cooldown');
+    const previous = airsoft.pellets[0].mesh.position.clone();
+    const initialY = airsoft.pellets[0].velocity.y;
+    airsoft.update(0.2, world, true);
+    check(airsoft.pellets[0].mesh.position.x < previous.x && airsoft.pellets[0].velocity.y < initialY,
+      'pellets must move forward and fall');
+    check(airsoft.shoot(camera), 'firing must resume after cooldown');
+    airsoft.update(1.5, world, false);
+    check(airsoft.pellets.length === 0 && airsoft.pelletGroup.children.length === 0,
+      'expired pellets must be removed from the scene');
+
+    airsoft.shoot(camera);
+    airsoft.update(0.01, { radius: 100, heightAt: () => 10 }, false);
+    check(airsoft.pellets.length === 0, 'pellets must disappear on reaching the ground');
+    airsoft.update(0.2, world, false);
+    airsoft.shoot(camera);
+    airsoft.clear();
+    check(airsoft.pellets.length === 0 && airsoft.pelletGroup.children.length === 0 && airsoft.shoot(camera),
+      'world changes must clear pellets and reset firing');
+
+    document.getElementById('result').textContent = 'PASS: airsoft player and visual pellets';
+  </script>
+</body>
+</html>
