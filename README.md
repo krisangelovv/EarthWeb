@@ -32,11 +32,15 @@ With the server running, open `http://localhost:8080/tests/roads.html` for map c
 
 The first-person arms and orange-tipped airsoft toy are procedural. Pellets are visual only: they fall and disappear on the ground or after a short time, with no damage or building impacts.
 
+Press `P` to spawn a plane nearby, then approach and press `E` to pilot. A connected friend can approach and press `E` to request the passenger seat. The pilot uses `W`/`S` to accelerate/slow, `A`/`D` to turn, and `Space`/`C` to climb/descend once moving. Flight is arcade-style, not realistic; land and stop before pressing `E` to exit. The passenger exits before the pilot. Mouse look is relative to the plane. The plane pauses when the pilot's area loads or the pilot opens the menu. It follows terrain but has no building or tree collision.
+
 ## Multiplayer
 
 Both players need their own copy of the game running in a browser. Once the world loads, the host selects **Create room** in the menu and shares the room code privately. The other player enters it and selects **Join room**; their world loads near the host. Press Esc to return to the menu and disconnect. Only two players can connect at once.
 
 Positions, facing, walking/aiming animation and visual airsoft shots are shared directly over WebRTC; pellets still have no damage or impacts on players. Each player hears a synthesized airsoft click for their own shots and received shots within their loaded area; the sound is not spatialized. Browsers require a click or keypress to enable audio. Both players should use the updated version. The PeerJS public signalling service and Cloudflare STUN server assist with establishing the connection. The other player receives your in-game location and can see your IP address; signalling and STUN services also see connection metadata. Only share the room code with someone you trust. No public TURN relay is configured, so restrictive networks may prevent connection. Both players need internet access to the signalling service and game data sources. Weather and time are not synchronised.
+
+The plane is controlled by its spawning player; the other player can ride as passenger. Only one shared plane is supported. If the pilot disconnects, a passenger is released into fly mode. Each player loads areas independently; a passenger may see the plane catch up after loading, and network delay can cause visible jumps. GPS follow is ignored while seated.
 
 ## How it works
 
@@ -55,6 +59,7 @@ Positions, facing, walking/aiming animation and visual airsoft shots are shared 
 - Grass patches are scattered in mapped vegetation areas and, when satellite and OSM data are available, green-looking imagery. This is an approximation, not an exact vegetation survey; buildings and roads missing from OSM cannot be excluded.
 - Satellite tiles are requested up to zoom 19, subject to the GPU texture limit and provider coverage. Esri's no-data placeholder is rejected, and the app retries lower-resolution satellite tiles before falling back to map tiles. Actual image detail varies by location.
 - Buildings are solid (footprint collision); the ground is followed exactly.
+- Menu radius goes up to 6000 m. Above 2000 m the terrain grid coarsens (radius/400 m cells), the tree cap triples, and the far plane is 9000 m. This uses much more GPU, memory and data, loads slowly, and the single satellite texture is lower resolution per metre.
 - Tunables: `src/config.js` (radius, texture/DEM zoom, tree cap, data endpoints).
 
 ## Known limits / next steps

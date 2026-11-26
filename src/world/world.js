@@ -70,7 +70,7 @@ export async function loadWorld(lat, lon, { renderer, options, signal, status })
   status('build', 'Building world', 'loading');
   const group = new THREE.Group();
   const terrain = buildTerrain({
-    frame, elevation, imagery, radius, step: CONFIG.terrainStep, renderer, centerLat: lat, centerLon: lon,
+    frame, elevation, imagery, radius, step: Math.max(CONFIG.terrainStep, radius / 400), renderer, centerLat: lat, centerLon: lon,
   });
   group.add(terrain.mesh);
 
@@ -97,7 +97,7 @@ export async function loadWorld(lat, lon, { renderer, options, signal, status })
   group.add(buildings.group);
   const vegetation = buildVegetation({
     trees: osm.trees, areas: osm.areas, buildingGrid: buildings.footprints, roadGrid: roads.grid, terrain, imagery, frame, radius,
-    maxTrees: CONFIG.maxTreeCount, inferFromImagery: options.inferTrees && !!osmJson && imagery.satellite,
+    maxTrees: radius > 2000 ? CONFIG.maxTreeCount * 3 : CONFIG.maxTreeCount, inferFromImagery: options.inferTrees && !!osmJson && imagery.satellite,
     grassFromImagery: !!osmJson && imagery.satellite,
   });
   group.add(vegetation.group);

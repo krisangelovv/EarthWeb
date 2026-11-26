@@ -31,11 +31,13 @@
       connect(id) { this.target = id; return this.outgoing = new FakeConnection(); }
       destroy() { this.destroyed = true; }
     }
-    let position = null, joined = null, status = '', receivedShot = null;
+    let position = null, joined = null, status = '', receivedShot = null, planeRequest = null, planeResponse = null;
     const scene = new THREE.Scene();
     const mp = new Multiplayer({
       scene, getPosition: () => position, onJoinLocation: (p) => { joined = p; },
       onStatus: (message) => { status = message; }, onShot: (shot) => { receivedShot = shot; }, loadPeer: async () => FakePeer,
+      onPlaneRequest: (action) => { planeRequest = action; },
+      onPlaneResponse: (ok, message) => { planeResponse = { ok, message }; },
     });
     const original = { lat: 42, lon: 23, height: 2, yaw: 1 };
     const world = { frame: new LocalFrame(42, 23), radius: 1000, heightAt: () => 10 };
@@ -91,6 +93,23 @@
       'remote avatar must snap into the new frame when the world changes');
     incoming.emit('data', { type: 'position', position: { ...original, lat: NaN } });
     check(mp.remote.lat === 42, 'invalid position must be ignored');
+    const aircraft = { lat: 42, lon: 23, altitude: 140, yaw: 0.4, speed: 15, passenger: true };
+    incoming.emit('data', { type: 'position', position: { ...original, altitude: 141, seat: 'passenger', plane: aircraft } });
+    const flightWorld = { ...world, terrain: { baseElev: 100 } };
+    mp.avatar.visible = false;
+    mp.update(0.1, flightWorld);
+    check(mp.remote.plane === aircraft && mp.avatar.position.y === 41 &&
+      mp.avatar.userData.leftLeg.rotation.x === -1, 'plane and seated altitude must synchronize');
+    incoming.emit('data', { type: 'position', position: { ...original, plane: { ...aircraft, speed: 1000 } } });
+    check(mp.remote.plane === aircraft, 'invalid aircraft states must be rejected');
+    check(mp.sendPlaneRequest('board') && incoming.messages.at(-1).action === 'board',
+      'passenger requests must be sent');
+    incoming.emit('data', { type: 'plane-request', action: 'board' });
+    check(planeRequest === 'board', 'passenger requests must be delivered');
+    mp.sendPlaneResponse(true, 'Passenger aboard.');
+    check(incoming.messages.at(-1).type === 'plane-response', 'seat response must be sent');
+    incoming.emit('data', { type: 'plane-response', ok: true, message: 'Passenger aboard.' });
+    check(planeResponse.ok && planeResponse.message === 'Passenger aboard.', 'seat response must be delivered');
     mp.update(0.1, world, mp.remote.received + 3001);
     check(!mp.avatar.visible, 'stale player must be hidden');
     mp.disconnect();

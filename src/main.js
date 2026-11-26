@@ -7,6 +7,7 @@ import { Player, findOpenSpawn } from './player.js';
 import { Airsoft } from './airsoft.js';
 import { ShotAudio } from './shot-audio.js';
 import { Multiplayer } from './multiplayer.js';
+import { Plane } from './plane.js';
 import { loadWorld } from './world/world.js';
 import { fetchWeather, WEATHER_PRESETS, describeWeather, weatherToEffects } from './data/weather.js';
 import { searchPlaces, currentPosition, watchPosition } from './data/location.js';
@@ -20,11 +21,13 @@ renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(70, 1, 0.2, 5000);
+const camera = new THREE.PerspectiveCamera(70, 1, 0.2, 9000);
 const env = new Environment(scene, renderer);
 const weatherFx = new WeatherFX(scene);
 const player = new Player(camera, renderer.domElement);
 const airsoft = new Airsoft(scene);
+const plane = new Plane(scene);
+let boardPending = 0;
 
 function resize() {
   renderer.setSize(innerWidth, innerHeight, false);
@@ -134,14 +137,24 @@ async function loadArea(lat, lon, { blocking = true } = {}) {
       throw new Error('No safe starting position found near this location.');
     }
     const old = state.world;
+    if (old && !blocking && plane.group.visible) plane.reframe(old, world);
+    if (old && blocking && plane.group.visible) {
+      if (plane.seat === 'passenger') multiplayer.sendPlaneRequest('leave');
+      plane.remove();
+      player.inVehicle = false;
+      boardPending = 0;
+    }
     if (old) { scene.remove(old.group); old.dispose(); }
     airsoft.clear();
     scene.add(world.group);
     env.wallMaterial = world.wallMaterial;
     state.world = world;
-    player.pos.set(spawn.x, world.heightAt(spawn.x, spawn.z), spawn.z);
-    player.vy = 0;
-    player.grounded = true;
+    if (plane.seat) plane.placePlayer(player);
+    else {
+      player.pos.set(spawn.x, world.heightAt(spawn.x, spawn.z), spawn.z);
+      player.vy = 0;
+      player.grounded = true;
+    }
     state.reloadAfter = 0;
     state.loading = false;
     $('loading').hidden = true;
@@ -192,7 +205,61 @@ const multiplayer = new Multiplayer({
   getPosition: () => {
     if (!state.world || state.loading) return null;
     return { ...playerGeo(), height: Math.max(0, player.pos.y - state.world.heightAt(player.pos.x, player.pos.z)),
-      yaw: player.yaw, pitch: player.pitch, moving };
+      altitude: player.pos.y + state.world.terrain.baseElev, yaw: player.yaw, pitch: player.pitch, moving,
+      seat: plane.seat, plane: plane.snapshot(state.world) };
+  },
+  onPlaneRequest: (action) => {
+    if (action === 'leave') {
+      if (plane.owner) plane.passenger = false;
+      return;
+    }
+    const world = state.world, remote = multiplayer.remote;
+    let message = '';
+    if (!world || state.loading || !plane.owner || plane.seat !== 'pilot') message = 'The pilot is not ready.';
+    else if (plane.passenger) message = 'The passenger seat is occupied.';
+    else if (!remote || performance.now() - remote.received > 3000 || remote.altitude === undefined)
+      message = 'Your position is unavailable; try again.';
+    else {
+      const p = world.frame.toLocal(remote.lat, remote.lon);
+      const distance = Math.hypot(p.x - plane.group.position.x, p.z - plane.group.position.z,
+        remote.altitude - world.terrain.baseElev - plane.group.position.y);
+      if (distance > 8) message = 'Move closer to the plane.';
+      else if (plane.speed > 2 || plane.group.position.y - world.heightAt(p.x, p.z) > 1)
+        message = 'The plane must be stopped on the ground.';
+    }
+    if (!message) plane.passenger = true;
+    multiplayer.sendPlaneResponse(!message, message || 'Passenger aboard.');
+    if (!message) toast('Passenger aboard.');
+  },
+  onPlaneResponse: (ok, message) => {
+    if (!boardPending) {
+      if (ok) multiplayer.sendPlaneRequest('leave');
+      return;
+    }
+    boardPending = 0;
+    if (ok && plane.group.visible && !plane.owner && state.world && !state.loading) {
+      plane.seat = 'passenger';
+      player.inVehicle = true;
+      player.fly = false;
+      plane.placePlayer(player);
+    } else if (ok) {
+      multiplayer.sendPlaneRequest('leave');
+      message = 'Could not board the plane; try again.';
+    }
+    toast(message);
+  },
+  onDisconnect: () => {
+    boardPending = 0;
+    if (plane.owner) plane.passenger = false;
+    else if (plane.group.visible) {
+      if (plane.seat) {
+        player.fly = true;
+        player.vy = 0;
+        toast('Plane disconnected; fly mode enabled.');
+      }
+      plane.remove();
+      player.inVehicle = false;
+    }
   },
   onShot: (shot) => {
     const world = state.world;
@@ -239,6 +306,36 @@ $('mp-leave').onclick = () => {
 $('walk').onclick = () => (state.world ? player.lock() : goTo(state.place));
 $('view').addEventListener('click', () => state.world && !state.loading && !player.locked && player.lock());
 let firing = false;
+
+window.addEventListener('keydown', (event) => {
+  if (!player.locked || !state.world || state.loading || event.repeat) return;
+  if (event.code === 'KeyP') {
+    const error = plane.spawn(state.world, player);
+    if (error) toast(error);
+    else toast('Plane spawned. Walk up and press E to enter.');
+  } else if (event.code === 'KeyE') {
+    if (plane.seat) {
+      const wasPassenger = plane.seat === 'passenger';
+      const error = plane.exit(state.world, player);
+      if (error) return toast(error);
+      player.inVehicle = false;
+      if (wasPassenger) multiplayer.sendPlaneRequest('leave');
+      toast('Left the plane.');
+    } else if (!plane.group.visible || plane.distanceTo(player) > 8) {
+      toast('Move closer to the plane.');
+    } else if (plane.owner) {
+      if (plane.boardPilot(player)) {
+        player.inVehicle = true;
+        toast('Pilot: W/S speed, A/D turn, Space/C climb or descend. E exits when stopped.');
+      }
+    } else if (!boardPending) {
+      if (plane.passenger) return toast('The passenger seat is occupied.');
+      if (!multiplayer.sendPlaneRequest('board')) return toast('Connect to the pilot first.');
+      boardPending = performance.now() + 5000;
+      toast('Requesting passenger seat...');
+    }
+  }
+});
 
 $('view').addEventListener('mousedown', (event) => {
   if (!player.locked || !state.world || state.loading) return;
@@ -348,7 +445,8 @@ function updateHud(sun, w) {
   hudAt = performance.now();
   const g = playerGeo(), b = player.bearing;
   $('hud-place').textContent = state.place.name;
-  $('hud-pos').textContent = `${g.lat.toFixed(5)}, ${g.lon.toFixed(5)} · ${Math.round(state.world.terrain.baseElev + player.pos.y)} m · ${COMPASS[Math.round(b / 45) % 8]} ${Math.round(b)}°${player.fly ? ' · FLY' : ''}`;
+  const vehicle = plane.seat ? ` · ${plane.seat.toUpperCase()} ${Math.round(plane.speed * 3.6)} km/h` : player.fly ? ' · FLY' : '';
+  $('hud-pos').textContent = `${g.lat.toFixed(5)}, ${g.lon.toFixed(5)} · ${Math.round(state.world.terrain.baseElev + player.pos.y)} m · ${COMPASS[Math.round(b / 45) % 8]} ${Math.round(b)}°${vehicle}`;
   $('hud-env').textContent = `${pad(hour)}:${pad((hour % 1) * 60)} · sun ${Math.round(sun.altitude / DEG)}° · ${describeWeather(w.code)} ${Math.round(w.temp)}°C · wind ${w.windSpeed.toFixed(1)} m/s`;
   const map = state.world.stats;
   $('hud-map').textContent = map.osm
@@ -399,10 +497,32 @@ renderer.setAnimationLoop(() => {
 
   if (world) {
     const oldX = player.pos.x, oldZ = player.pos.z;
-    if (!state.loading) player.update(dt, world);
+    if (!state.loading) {
+      const remote = multiplayer.remote;
+      if (remote?.plane) {
+        if (plane.owner && multiplayer.role === 'join') {
+          if (plane.seat) { player.fly = true; player.inVehicle = false; }
+          plane.remove();
+          toast("Using the host's plane.");
+        }
+        if (!plane.owner) plane.applyRemote(remote.plane, world, player);
+      } else if (remote && !plane.owner && plane.group.visible) {
+        if (plane.seat) { player.fly = true; player.inVehicle = false; toast('Plane unavailable; fly mode enabled.'); }
+        plane.remove();
+      }
+      if (boardPending && performance.now() > boardPending) {
+        boardPending = 0;
+        toast('Passenger request timed out.');
+      }
+      if (plane.seat) plane.update(player.locked ? dt : 0, world, player);
+      else {
+        plane.update(dt, world, player);
+        player.update(dt, world);
+      }
+    }
     if (!state.loading) airsoft.update(dt, world, player.locked &&
       ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowLeft', 'ArrowDown', 'ArrowRight'].some((key) => player.keys.has(key)));
-    followGps(dt, world);
+    if (!plane.seat) followGps(dt, world);
     moving = !state.loading && Math.hypot(player.pos.x - oldX, player.pos.z - oldZ) > 0.001;
     if (!state.loading && performance.now() >= state.reloadAfter &&
         Math.hypot(player.pos.x, player.pos.z) > world.radius * CONFIG.reloadFraction) {
@@ -440,7 +560,7 @@ function followGps(dt, world) {
 }
 
 // Handy for tinkering in the browser console (e.g. earthweb.player.pos.set(...)).
-window.earthweb = { state, player, airsoft, multiplayer, env, scene, camera };
+window.earthweb = { state, player, airsoft, multiplayer, plane, env, scene, camera };
 
 // Kick off the first load immediately; the menu offers "Walk" once it is ready.
 goTo(state.place);

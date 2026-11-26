@@ -27,6 +27,7 @@ export class Player {
     this.vy = 0;
     this.grounded = true;
     this.fly = false;
+    this.inVehicle = false;
     this.keys = new Set();
     this.enabled = false;
     this.onLockChange = () => {};
@@ -34,7 +35,7 @@ export class Player {
     addEventListener('keydown', (e) => {
       if (!this.locked) return;
       this.keys.add(e.code);
-      if (e.code === 'KeyF') this.fly = !this.fly;
+      if (e.code === 'KeyF' && !this.inVehicle && !e.repeat) this.fly = !this.fly;
       if (e.code === 'Space') e.preventDefault();
     });
     addEventListener('keyup', (e) => this.keys.delete(e.code));

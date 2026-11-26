@@ -13,6 +13,8 @@
     import * as THREE from 'three';
     import { Airsoft } from '../src/airsoft.js';
     import { ShotAudio } from '../src/shot-audio.js';
+    import { Plane } from '../src/plane.js';
+    import { LocalFrame } from '../src/geo.js';
     import { findOpenSpawn } from '../src/player.js';
 
     const check = (condition, message) => { if (!condition) throw new Error(message); };
@@ -85,6 +87,45 @@
     check(spawn && !blockedWorld.blocked(spawn.x, spawn.z), 'spawn must escape a building footprint');
     check(findOpenSpawn({ radius: 10, blocked: () => true }) === null,
       'spawn must report when no nearby position is available');
+
+    const flightWorld = { radius: 1000, frame: new LocalFrame(42, 23), terrain: { baseElev: 100 },
+      heightAt: () => 0, blocked: () => false };
+    const pilot = { pos: new THREE.Vector3(), yaw: 0, pitch: 0, keys: new Set(), camera: new THREE.PerspectiveCamera() };
+    const plane = new Plane(scene);
+    check(plane.spawn(flightWorld, pilot) === null && plane.group.visible, 'plane must spawn nearby');
+    check(plane.boardPilot(pilot) && plane.seat === 'pilot', 'nearby player must board the pilot seat');
+    pilot.keys.add('KeyW');
+    pilot.keys.add('Space');
+    for (let i = 0; i < 30; i++) plane.update(0.1, flightWorld, pilot);
+    check(plane.group.position.z < -20 && plane.group.position.y > 0 && pilot.pos.y > 0,
+      'pilot controls must move the plane and its occupant');
+    const yaw = pilot.yaw;
+    pilot.keys.add('KeyA');
+    plane.update(0.1, flightWorld, pilot);
+    check(pilot.yaw > yaw && Math.abs(pilot.yaw - plane.group.rotation.y) < 1e-6,
+      'pilot view must follow plane turns');
+    pilot.keys.delete('KeyA');
+    check(plane.exit(flightWorld, pilot) !== null, 'cannot exit a moving airborne plane');
+    const before = plane.snapshot(flightWorld);
+    const passenger = { pos: new THREE.Vector3(), yaw: 0, pitch: 0, keys: new Set(), camera: new THREE.PerspectiveCamera() };
+    const remotePlane = new Plane(scene);
+    remotePlane.applyRemote({ ...before, yaw: 0 }, flightWorld, passenger);
+    remotePlane.seat = 'passenger';
+    remotePlane.applyRemote({ ...before, yaw: 0.4 }, flightWorld, passenger);
+    remotePlane.update(0.1, flightWorld, passenger);
+    check(Math.abs(passenger.yaw - 0.4) < 1e-6 && passenger.pos.distanceTo(remotePlane.group.position) < 1,
+      'passenger must remain seated and turn with the remote plane');
+    const reframed = { ...flightWorld, frame: new LocalFrame(42.001, 23.001), terrain: { baseElev: 120 } };
+    plane.reframe(flightWorld, reframed);
+    const after = plane.snapshot(reframed);
+    check(Math.abs(before.lat - after.lat) < 1e-8 && Math.abs(before.lon - after.lon) < 1e-8 &&
+      Math.abs(before.altitude - after.altitude) < 1e-6, 're-centering must preserve plane location and altitude');
+    plane.group.position.y = 0;
+    plane.speed = 0;
+    plane.passenger = true;
+    check(plane.exit(flightWorld, pilot) !== null, 'pilot cannot abandon an occupied passenger seat');
+    plane.passenger = false;
+    check(plane.exit(flightWorld, pilot) === null && plane.seat === null, 'pilot must exit safely on the ground');
 
     const NativeAudioContext = window.AudioContext;
     let startedSounds = 0;

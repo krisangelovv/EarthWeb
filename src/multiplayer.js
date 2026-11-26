@@ -11,7 +11,19 @@ function validPosition(p) {
     Number.isFinite(p.height) && p.height >= 0 && p.height < 10000 &&
     Number.isFinite(p.yaw) && Math.abs(p.yaw) < 100000 &&
     (p.pitch === undefined || Number.isFinite(p.pitch) && Math.abs(p.pitch) <= 1.5) &&
-    (p.moving === undefined || typeof p.moving === 'boolean');
+    (p.moving === undefined || typeof p.moving === 'boolean') &&
+    (p.altitude === undefined || Number.isFinite(p.altitude) && Math.abs(p.altitude) <= 20000) &&
+    (p.seat === undefined || p.seat === null || p.seat === 'pilot' || p.seat === 'passenger') &&
+    (p.plane === undefined || p.plane === null || validPlane(p.plane));
+}
+
+function validPlane(p) {
+  return p && Number.isFinite(p.lat) && Math.abs(p.lat) <= 85 &&
+    Number.isFinite(p.lon) && Math.abs(p.lon) <= 180 &&
+    Number.isFinite(p.altitude) && Math.abs(p.altitude) <= 20000 &&
+    Number.isFinite(p.yaw) && Math.abs(p.yaw) < 100000 &&
+    Number.isFinite(p.speed) && p.speed >= 0 && p.speed <= 22 &&
+    typeof p.passenger === 'boolean';
 }
 
 function validShot(p) {
@@ -61,11 +73,15 @@ function makeAvatar() {
 }
 
 export class Multiplayer {
-  constructor({ scene, getPosition, onJoinLocation, onStatus, onShot = () => {}, loadPeer }) {
+  constructor({ scene, getPosition, onJoinLocation, onStatus, onShot = () => {}, onPlaneRequest = () => {},
+    onPlaneResponse = () => {}, onDisconnect = () => {}, loadPeer }) {
     this.getPosition = getPosition;
     this.onJoinLocation = onJoinLocation;
     this.onStatus = onStatus;
     this.onShot = onShot;
+    this.onPlaneRequest = onPlaneRequest;
+    this.onPlaneResponse = onPlaneResponse;
+    this.onDisconnect = onDisconnect;
     this.loadPeer = loadPeer || (() => import('https://esm.sh/peerjs@1.5.5?bundle').then((m) => m.default));
     this.avatar = makeAvatar();
     scene.add(this.avatar);
@@ -153,6 +169,15 @@ export class Multiplayer {
         }
         return;
       }
+      if (data.type === 'plane-request' && (data.action === 'board' || data.action === 'leave')) {
+        this.onPlaneRequest(data.action);
+        return;
+      }
+      if (data.type === 'plane-response' && typeof data.ok === 'boolean' &&
+          typeof data.message === 'string' && data.message.length <= 120) {
+        this.onPlaneResponse(data.ok, data.message);
+        return;
+      }
       if (!validPosition(data.position)) return;
       if (data.type === 'welcome' && this.role === 'join' && !this.receivedWelcome) {
         this.receivedWelcome = true;
@@ -176,6 +201,18 @@ export class Multiplayer {
     }
     try { this.connection.send({ type: 'shot', shot }); }
     catch (error) { this.fail('Could not send shot: ' + error.message); }
+  }
+
+  sendPlaneRequest(action) {
+    if (!this.connection?.open || (action !== 'board' && action !== 'leave')) return false;
+    try { this.connection.send({ type: 'plane-request', action }); return true; }
+    catch (error) { this.fail('Could not send plane request: ' + error.message); return false; }
+  }
+
+  sendPlaneResponse(ok, message) {
+    if (!this.connection?.open) return;
+    try { this.connection.send({ type: 'plane-response', ok, message }); }
+    catch (error) { this.fail('Could not send plane response: ' + error.message); }
   }
 
   update(dt, world, now = performance.now()) {
@@ -206,14 +243,15 @@ export class Multiplayer {
       this.avatar.visible = false;
       return;
     }
-    const target = new THREE.Vector3(p.x, world.heightAt(p.x, p.z) + this.remote.height, p.z);
+    const target = new THREE.Vector3(p.x, this.remote.altitude === undefined
+      ? world.heightAt(p.x, p.z) + this.remote.height : this.remote.altitude - world.terrain.baseElev, p.z);
     if (!this.avatar.visible) this.avatar.position.copy(target);
     else this.avatar.position.lerp(target, 1 - Math.exp(-dt * 12));
     this.avatar.rotation.y = this.remote.yaw;
     this.walkTime += dt * 9;
-    const swing = this.remote.moving ? Math.sin(this.walkTime) * 0.45 : 0;
+    const swing = this.remote.seat ? -1 : this.remote.moving ? Math.sin(this.walkTime) * 0.45 : 0;
     this.avatar.userData.leftLeg.rotation.x = swing;
-    this.avatar.userData.rightLeg.rotation.x = -swing;
+    this.avatar.userData.rightLeg.rotation.x = this.remote.seat ? swing : -swing;
     this.shotRecoil = Math.max(0, this.shotRecoil - dt * 7);
     this.avatar.userData.upper.rotation.x = (this.remote.pitch || 0) + this.shotRecoil * 0.12;
     this.avatar.visible = true;
@@ -237,6 +275,7 @@ export class Multiplayer {
     this.lastRemoteShot = 0;
     this.shotRecoil = 0;
     this.avatar.visible = false;
+    if (connection) this.onDisconnect();
     if (connection) connection.close();
     if (peer) peer.destroy();
   }
